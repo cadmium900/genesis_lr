@@ -1,19 +1,19 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 
 class GO2Cfg( LeggedRobotCfg ):
-    
+
     class env( LeggedRobotCfg.env ):
         num_envs = 4096
         num_observations = 48
         num_privileged_obs = None
         num_actions = 12
         env_spacing = 0.5
-    
+
     class terrain( LeggedRobotCfg.terrain ):
         mesh_type = "plane" # none, plane, heightfield
         friction = 1.0
         restitution = 0.
-        
+
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
@@ -65,7 +65,7 @@ class GO2Cfg( LeggedRobotCfg ):
         terminate_after_contacts_on = ["base"]
         links_to_keep = ['FL_foot', 'FR_foot', 'RL_foot', 'RR_foot']
         self_collisions = True
-  
+
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.36
@@ -93,7 +93,7 @@ class GO2Cfg( LeggedRobotCfg ):
             # gait
             feet_air_time = 1.0
             foot_clearance = 0.5
-    
+
     class commands( LeggedRobotCfg.commands ):
         curriculum = True
         max_curriculum = 1.
@@ -121,8 +121,8 @@ class GO2CfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         policy_class_name = 'ActorCritic'
         run_name = ''
-        experiment_name = 'go2'
+        experiment_name = 'go2_spaw'
         save_interval = 100
-        load_run = "Jul21_17-07-50_"
+        load_run = "Aug30_19-01-07_"
         checkpoint = -1
         max_iterations = 1000

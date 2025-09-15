@@ -4,11 +4,11 @@ class LeggedRobotCfg(BaseConfig):
     class env:
         num_envs = 4096
         num_observations = 48
-        num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
+        num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
         num_actions = 12
         send_timeouts = True # send time out information to the algorithm
         episode_length_s = 20 # episode length in seconds
-        debug = False # if debugging, visualize contacts, 
+        debug = False # if debugging, visualize contacts,
         debug_viz = False # draw debug visualizations
         env_spacing = 1.0
 
@@ -58,7 +58,7 @@ class LeggedRobotCfg(BaseConfig):
         # initial state randomization
         yaw_angle_range = [0.0, 0.0] # min max [rad]
         default_joint_angles = { # target angles when action = 0.0
-            "joint_a": 0., 
+            "joint_a": 0.,
             "joint_b": 0.}
 
     class control:
@@ -71,7 +71,7 @@ class LeggedRobotCfg(BaseConfig):
         dt =  0.02 # control frequency 50Hz
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
-        
+
     class asset:
         name = None
         dof_names = ["joint_a", "joint_b"]
@@ -83,7 +83,7 @@ class LeggedRobotCfg(BaseConfig):
         links_to_keep = []
         self_collisions = True   # enable self collisions by default
         fix_base_link = False    # fix base link to the world
-        
+
     class domain_rand:
         randomize_friction = True
         friction_range = [0.5, 1.25]
@@ -114,13 +114,13 @@ class LeggedRobotCfg(BaseConfig):
             torques = -0.00001
             dof_vel = -0.
             dof_acc = -2.5e-7
-            base_height = -0. 
+            base_height = -0.
             feet_air_time = 0 # 1.0
             collision = -1.
-            feet_stumble = -0.0 
+            feet_stumble = -0.0
             action_rate = -0.01
             stand_still = -0.
-        
+
         only_positive_rewards = True
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
         soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
@@ -159,7 +159,7 @@ class LeggedRobotCfg(BaseConfig):
         ref_env = 0
         pos = [2, 2, 2]       # [m]
         lookat = [0., 0, 1.]  # [m]
-        rendered_envs_idx = [i for i in range(5)]  # number of environments to be rendered
+        rendered_envs_idx = [i for i in range(15)]  # number of environments to be rendered
         add_camera = False
 
     class sim:
@@ -178,7 +178,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         # rnn_type = 'lstm'
         # rnn_hidden_size = 512
         # rnn_num_layers = 1
-        
+
     class algorithm:
         # training params
         value_loss_coef = 1.0

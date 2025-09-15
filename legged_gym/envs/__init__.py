@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -48,6 +48,10 @@ from legged_gym.envs.go2.go2_sysid.go2_sysid_config import GO2SysIDCfg
 from legged_gym.envs.go2.go2_ts.go2_ts import Go2TS
 from legged_gym.envs.go2.go2_ts.go2_ts_config import Go2TSCfg, Go2TSCfgPPO
 
+# go2_spark
+from legged_gym.envs.go2.go2_spark_biped.go2_spark_biped import GO2SparkBiped
+from legged_gym.envs.go2.go2_spark_biped.go2_spark_biped_config import GO2SparkBipedCfg, GO2SparkBipedCfgPPO
+
 from legged_gym.utils.task_registry import task_registry
 
 task_registry.register( "go2", GO2, GO2Cfg(), GO2CfgPPO())
@@ -55,4 +59,5 @@ task_registry.register( "go2_rough", GO2, GO2RoughCfg(), GO2RoughCfgPPO())
 task_registry.register( "go2_wtw", GO2WTW, GO2WTWCfg(), GO2WTWCfgPPO())
 task_registry.register( "go2_sysid", GO2SysID, GO2SysIDCfg(), GO2CfgPPO())
 task_registry.register( "go2_ts", Go2TS, Go2TSCfg(), Go2TSCfgPPO())
+task_registry.register( "go2_spark_biped", GO2SparkBiped, GO2SparkBipedCfg(), GO2SparkBipedCfgPPO())
 task_registry.register( "bipedal_walker", BipedalWalker, BipedalWalkerCfg(), BipedalWalkerCfgPPO())

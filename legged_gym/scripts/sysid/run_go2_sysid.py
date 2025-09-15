@@ -1,7 +1,9 @@
+import os
+os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = os.path.expanduser("cache")
+
 from legged_gym.envs import *
 from legged_gym.utils import get_args, task_registry, class_to_dict
 import genesis as gs
-
 
 args = get_args() # sysid in air
 args.headless = True

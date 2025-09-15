@@ -17,6 +17,16 @@ def gs_inv_quat(quat):
     inv_quat = torch.stack([1.0 * qw, -qx, -qy, -qz], dim=-1)
     return inv_quat
 
+def quat_rotate(q, v):
+    """
+    Rotate vector(s) v by quaternion(s) q (wxyz order).
+    q: [N,4], v: [N,3] -> returns [N,3]
+    """
+    q = F.normalize(q, dim=-1)
+    w, x, y, z = q.unbind(-1)
+    qv = torch.stack([x, y, z], dim=-1)                 # [N,3]
+    t  = 2.0 * torch.cross(qv, v, dim=-1)               # [N,3]
+    return v + w.unsqueeze(-1) * t + torch.cross(qv, t, dim=-1)
 
 def gs_transform_by_quat(pos, quat):
     qw, qx, qy, qz = quat.unbind(-1)
@@ -39,6 +49,24 @@ def gs_transform_by_quat(pos, quat):
 
     return rotated_pos
 
+def quat_to_mat(quat):
+    qw, qx, qy, qz = quat.unbind(-1)
+
+    rot_matrix = torch.stack(
+        [
+            1.0 - 2 * qy**2 - 2 * qz**2,
+            2 * qx * qy - 2 * qz * qw,
+            2 * qx * qz + 2 * qy * qw,
+            2 * qx * qy + 2 * qz * qw,
+            1 - 2 * qx**2 - 2 * qz**2,
+            2 * qy * qz - 2 * qx * qw,
+            2 * qx * qz - 2 * qy * qw,
+            2 * qy * qz + 2 * qx * qw,
+            1 - 2 * qx**2 - 2 * qy**2,
+        ],
+        dim=-1,
+    ).reshape(*quat.shape[:-1], 3, 3)
+    return rot_matrix
 
 def gs_quat2euler(quat):  # xyz
     # Extract quaternion components

@@ -1,6 +1,15 @@
+import os
+import sys
+
+os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = os.path.expanduser("cache")
+base_path = os.path.abspath(os.path.join(os.getcwd(), "..", ".."))
+
+# Prepend it to sys.path at runtime
+if base_path not in sys.path:
+    sys.path.insert(0, base_path)
+
 import argparse
 import numpy as np
-import os
 from datetime import datetime
 
 import genesis as gs
@@ -10,13 +19,11 @@ import torch
 import shutil
 
 def train(args):
-    gs.init(
-        backend=gs.cpu if args.cpu else gs.gpu,
-        logging_level='warning')
+    gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level='warning')
     # Make environment and algorithm runner
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
-    
+
     # Copy env.py and env_config.py to log_dir for backup
     log_dir = ppo_runner.log_dir
     if not os.path.exists(log_dir):
@@ -29,7 +36,7 @@ def train(args):
         robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+"_config.py")
     shutil.copy(robot_file_path, log_dir)
     shutil.copy(robot_config_path, log_dir)
-    
+
     # Start training session
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 

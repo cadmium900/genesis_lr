@@ -1,6 +1,7 @@
 import genesis as gs
 from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
+os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = os.path.expanduser("cache")
 
 from legged_gym.envs import *
 from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, QuadLogger
@@ -52,7 +53,7 @@ def play(args):
     train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
-    
+
     # export policy as a jit module (used to run it from C++)
     if EXPORT_POLICY:
         path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, train_cfg.runner.load_run, 'exported')
@@ -64,7 +65,7 @@ def play(args):
     joint_index = 2 # which joint is used for logging
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
-    
+
     # for FOLLOW_ROBOT
     camera_lookat_follow = np.array(env_cfg.viewer.lookat)
     camera_deviation_follow = np.array([0., 3., -1.])

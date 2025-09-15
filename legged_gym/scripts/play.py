@@ -1,9 +1,30 @@
+import os
+import sys
+os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = os.path.expanduser("cache")
+
+# Resolve the path two levels up from current working directory
+base_path = os.path.abspath(os.path.join(os.getcwd(), "..", ".."))
+
+# Prepend it to sys.path at runtime
+if base_path not in sys.path:
+    sys.path.insert(0, base_path)
+
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+# optional: help libs that read __stderr__/__stdout__
+if getattr(sys, "__stderr__", None) is None:
+    sys.__stderr__ = sys.stderr
+if getattr(sys, "__stdout__", None) is None:
+    sys.__stdout__ = sys.stdout
+
 import genesis as gs
 from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
 
 from legged_gym.envs import *
-from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
+from legged_gym.utils import  get_args, export_policy_as_jit, export_estimator_as_jit, task_registry, Logger
 
 import numpy as np
 import torch
@@ -41,23 +62,34 @@ def play(args):
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
+    print("Observation shape:", obs.shape)
     # load policy
     train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
-    
+
     # export policy as a jit module (used to run it from C++)
     if EXPORT_POLICY:
         path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'policies')
-        export_policy_as_jit(ppo_runner.alg.actor_critic, path)
+        export_policy_as_jit(ppo_runner.alg.actor_critic, path, "go2")
         print('Exported policy as jit script to: ', path)
+    # if EXPORT_POLICY:
+    #     base = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported')
+    #     pol_dir = os.path.join(base, 'policies')
+    #     os.makedirs(pol_dir, exist_ok=True)
+
+    #     single_obs_dim = 57                # your C++ layout
+    #     frame_stack    = train_cfg.env.frame_stack  # e.g., 5
+
+    #     export_policy_end2end(ppo_runner.alg.actor_critic, estimator, pol_dir,
+    #                         name="go2", single_obs_dim=single_obs_dim, frame_stack=frame_stack)
 
     logger = Logger(env.dt)
     robot_index = 0 # which robot is used for logging
     joint_index = 2 # which joint is used for logging
     stop_state_log = 300 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
-    
+
     # for MOVE_CAMERA
     camera_position = np.array(env_cfg.viewer.pos, dtype=np.float64)
     camera_vel = np.array([1., 1., 0.])
@@ -88,13 +120,13 @@ def play(args):
         if RECORD_FRAMES and i == stop_record:
             env.floating_camera.stop_recording(save_to_filename="go2_rough_demo.mp4", fps=30)
             print("Saved recording to " + "go2_rough_demo.mp4")
-        
+
         # print debug info
         # print("base lin vel: ", env.base_lin_vel[robot_index, :].cpu().numpy())
         # print("base yaw angle: ", env.base_euler[robot_index, 2].item())
         # print("base height: ", env.base_pos[robot_index, 2].cpu().numpy())
         # print("foot_height: ", env.link_pos[robot_index, env.feet_indices, 2].cpu().numpy())
-        
+
         if i < stop_state_log:
             logger.log_states(
                 {
@@ -123,7 +155,9 @@ def play(args):
             logger.print_rewards()
 
 if __name__ == '__main__':
-    EXPORT_POLICY = False
+    import multiprocessing as mp
+    mp.freeze_support()
+    EXPORT_POLICY = True
     RECORD_FRAMES = False  # only record frames in extra camera view
     MOVE_CAMERA   = False
     FOLLOW_ROBOT  = False

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -67,8 +67,8 @@ class TSRunner:
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, 
-                              [self.env.num_obs], [self.env.num_privileged_obs], 
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env,
+                              [self.env.num_obs], [self.env.num_privileged_obs],
                               [self.env.num_history_obs], [self.env.num_actions])
 
         # Log
@@ -79,7 +79,7 @@ class TSRunner:
         self.current_learning_iteration = 0
 
         self.env.reset()
-    
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
@@ -107,7 +107,7 @@ class TSRunner:
                     obs, privileged_obs, obs_history, rewards, dones = obs.to(self.device), \
                         privileged_obs.to(self.device), obs_history.to(self.device), rewards.to(self.device), dones.to(self.device)
                     self.alg.process_env_step(rewards, dones, infos)
-                    
+
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
@@ -135,7 +135,7 @@ class TSRunner:
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
-        
+
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
@@ -157,7 +157,7 @@ class TSRunner:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.6f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 

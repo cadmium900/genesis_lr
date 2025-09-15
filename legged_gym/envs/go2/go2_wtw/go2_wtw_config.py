@@ -74,11 +74,12 @@ class GO2WTWCfg(LeggedRobotCfg):
 
     class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.9
-        base_height_tracking_sigma = 0.01
+        base_height_tracking_sigma = 0.05
+        soft_touchdown = 0.5
         foot_height_offset = 0.022 # height of the foot coordinate origin above ground [m]
-        foot_clearance_tracking_sigma = 0.01
+        foot_clearance_tracking_sigma = 0.02
         euler_tracking_sigma = 0.1
-        about_landing_threshold = 0.03
+        about_landing_threshold = 0.04
         only_positive_rewards = True
 
         class scales(LeggedRobotCfg.rewards.scales):
@@ -86,23 +87,24 @@ class GO2WTWCfg(LeggedRobotCfg):
             dof_pos_limits = -10.0
             collision = -1.0
             # command tracking
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
+            tracking_lin_vel = 0.7
+            tracking_ang_vel = 0.55
             tracking_base_height = 0.6
-            orientation = 0.6
-            foot_clearance = 0.6
-            quad_periodic_gait = 1.0
+            orientation = 0.62
+            foot_clearance = 0.5
+            quad_periodic_gait = 1.5
             # smooth
-            lin_vel_z = -0.5
+            lin_vel_z = -1.5
             ang_vel_xy = -0.05
             dof_vel = -5.e-4
             dof_acc = -2.e-7
-            action_rate = -0.01
-            action_smoothness = -0.01
+            action_rate = -0.003
+            action_smoothness = -0.03
             torques = -2.e-4
-            foot_landing_vel = -0.15
+            foot_landing_vel = -0.05
             hip_pos = -1.0
-            
+            stand_still = -1.7
+
         class periodic_reward_framework:
             '''Periodic reward framework in OSU's paper(https://arxiv.org/abs/2011.01387)'''
             gait_function_type = "smooth" # can be "step" or "smooth"
@@ -113,14 +115,14 @@ class GO2WTWCfg(LeggedRobotCfg):
             theta_fr_list = [0.5, 0.0, 0.0]
             theta_rl_list = [0.5, 0.5, 0.5]
             theta_rr_list = [0.0, 0.5, 0.0]
-        
+
         class behavior_params_range:
             resampling_time = 6.0
-            gait_period_range = [0.3, 0.6]
-            foot_clearance_target_range = [0.03, 0.12]
-            base_height_target_range = [0.2, 0.36]
+            gait_period_range = [0.40, 0.55]
+            foot_clearance_target_range = [0.06, 0.12]
+            base_height_target_range = [0.20, 0.32]
             pitch_target_range = [-0.3, 0.3]
-            
+
     class commands(LeggedRobotCfg.commands):
         curriculum = True
         max_curriculum = 1.
@@ -161,7 +163,7 @@ class GO2WTWCfg(LeggedRobotCfg):
     class normalization(LeggedRobotCfg.normalization):
         clip_observations = 20.
         clip_actions = 10.
-    
+
     class noise(LeggedRobotCfg.noise):
         class noise_scales(LeggedRobotCfg.noise.noise_scales):
             dof_pos = 0.03
@@ -172,16 +174,21 @@ class GO2WTWCfg(LeggedRobotCfg):
             height_measurements = 0.1
 
 class GO2WTWCfgPPO(LeggedRobotCfgPPO):
-    seed = 0
+    seed = -1
     runner_class_name = "OnPolicyRunner"
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.01
+        num_mini_batches = 4
+        num_learning_epochs = 5
+        clip_param = 0.2
+        schedule = 'adaptive' # could be adaptive, fixed
 
     class runner(LeggedRobotCfgPPO.runner):
         run_name = 'smooth_gait'
         experiment_name = 'go2_wtw'
         save_interval = 500
-        load_run = "Aug30_12-04-17_smooth_gait"
+        load_run = "Sep03_12-45-14_smooth_gait"
         checkpoint = -1
         max_iterations = 4000
+        num_steps_per_env = 24

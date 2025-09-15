@@ -5,8 +5,6 @@ from genesis.engine.solvers.avatar_solver import AvatarSolver
 from legged_gym import LEGGED_GYM_ROOT_DIR, envs
 from time import time
 import numpy as np
-import os
-
 import torch
 from torch import Tensor
 from typing import Tuple, Dict
@@ -41,6 +39,7 @@ class LeggedRobot(BaseTask):
 
         self._init_buffers()
         self._prepare_reward_function()
+        self.init_camera_pos = False
         self.init_done = True
 
     def step(self, actions):
@@ -82,7 +81,7 @@ class LeggedRobot(BaseTask):
 
     def post_physics_step(self):
         """ check terminations, compute observations and rewards
-            calls self._post_physics_step_callback() for common computations 
+            calls self._post_physics_step_callback() for common computations
             calls self._draw_debug_vis() if needed
         """
         self.episode_length_buf += 1
@@ -294,6 +293,7 @@ class LeggedRobot(BaseTask):
     def create_sim(self):
         """ Creates simulation, terrain and evironments
         """
+
         # create scene
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(
@@ -303,9 +303,9 @@ class LeggedRobot(BaseTask):
                 max_FPS=int(1 / self.dt * self.cfg.control.decimation),
                 camera_pos=np.array(self.cfg.viewer.pos),
                 camera_lookat=np.array(self.cfg.viewer.lookat),
-                camera_fov=40,
+                camera_fov=60,
             ),
-            vis_options=gs.options.VisOptions(rendered_envs_idx= self.cfg.viewer.rendered_envs_idx),
+            vis_options=gs.options.VisOptions(rendered_envs_idx=self.cfg.viewer.rendered_envs_idx),
             rigid_options=gs.options.RigidOptions(
                 dt=self.sim_dt,
                 constraint_solver=gs.constraint_solver.Newton,
@@ -349,7 +349,7 @@ class LeggedRobot(BaseTask):
             self.terrain_y_range[0] = -self.cfg.terrain.border_size + 1.0
             self.terrain_y_range[1] = self.cfg.terrain.border_size + \
                 self.cfg.terrain.num_cols * self.cfg.terrain.terrain_width - 1.0
-        elif self.cfg.terrain.mesh_type =='plane': # the plane used has limited size, 
+        elif self.cfg.terrain.mesh_type =='plane': # the plane used has limited size,
                                                  # and the origin of the world is at the center of the plane
             self.terrain_x_range[0] = -self.cfg.terrain.plane_length/2+1
             self.terrain_x_range[1] = self.cfg.terrain.plane_length/2-1
@@ -373,7 +373,7 @@ class LeggedRobot(BaseTask):
             res= (1280, 960),
             pos=np.array(self.cfg.viewer.pos),
             lookat=np.array(self.cfg.viewer.lookat),
-            fov=40,
+            fov=60,
             GUI=True,
         )
 
@@ -497,8 +497,25 @@ class LeggedRobot(BaseTask):
         self.robot.set_dofs_velocity(velocity=base_vel, dofs_idx_local=[
                                      0, 1, 2, 3, 4, 5], envs_idx=envs_idx)
 
+        if not self.init_camera_pos:
+            self.init_camera_pos = True
+            if not self.headless:
+                # Set camera
+                # extract world position of env 0
+                origin0 = self.env_origins[0].detach().cpu().numpy()  # shape (3,)
+
+                # set camera position a bit above it
+                cam_pos = origin0 + np.array([-2.0, 0.0, 2.0])   # 2 units up
+                cam_lookat = origin0                            # look at env center
+
+                self.scene.viewer.set_camera_pose(
+                    pos=cam_pos,
+                    lookat=cam_lookat
+                )
+
+
     def _push_robots(self):
-        """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity. 
+        """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity.
         """
         if self.push_interval_s > 0 and not self.debug:
             max_push_vel_xy = self.cfg.domain_rand.max_push_vel_xy
@@ -1155,11 +1172,11 @@ class LeggedRobot(BaseTask):
             ), dim=-1
         )
         return torch.exp(-clearance_error / self.cfg.rewards.foot_clearance_tracking_sigma)
-    
+
     def _reward_foot_landing_vel(self):
         z_vels = self.feet_vel[:, :, 2]
         contacts = self.link_contact_forces[:, self.feet_indices, 2] > 0.1
-        about_to_land = ((self.feet_pos[:, :, 2] - 
+        about_to_land = ((self.feet_pos[:, :, 2] -
                           self.cfg.rewards.foot_height_offset) <
                          self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
         landing_z_vels = torch.where(

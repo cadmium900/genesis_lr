@@ -21,10 +21,10 @@ from scipy.stats import vonmises
 
 
 class GO2WTW(LeggedRobot):
-    
+
     def post_physics_step(self):
         """ check terminations, compute observations and rewards
-            calls self._post_physics_step_callback() for common computations 
+            calls self._post_physics_step_callback() for common computations
             calls self._draw_debug_vis() if needed
         """
         self.episode_length_buf += 1
@@ -44,7 +44,7 @@ class GO2WTW(LeggedRobot):
         self.link_contact_forces[:] = self.robot.get_links_net_contact_force()
         self.feet_pos[:] = self.robot.get_links_pos()[:, self.feet_indices, :]
         self.feet_vel[:] = self.robot.get_links_vel()[:, self.feet_indices, :]
-        
+
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
@@ -59,7 +59,7 @@ class GO2WTW(LeggedRobot):
         over_limit_indices = is_over_limit.nonzero(as_tuple=False).flatten()
         self.gait_time[over_limit_indices] = 0.0
         self.phi = self.gait_time / self.gait_period
-        
+
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         if self.num_build_envs > 0:
             self.reset_idx(env_ids)
@@ -72,7 +72,7 @@ class GO2WTW(LeggedRobot):
 
         if self.debug_viz:
             self._draw_debug_vis()
-    
+
     def _compute_torques(self, actions):
         # control_type = 'P'
         actions_scaled = actions * self.cfg.control.action_scale
@@ -227,7 +227,7 @@ class GO2WTW(LeggedRobot):
         self.extras["episode"]["foot_clearance_target"] = torch.mean(self.foot_clearance_target[:])
         self.extras["episode"]["pitch_target"] = torch.mean(self.pitch_target[:])
         self.extras["episode"]["theta_fr"] = torch.mean(self.theta[:, 1])
-        
+
         # reset action queue and delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
             self.action_queue[env_ids] *= 0.
@@ -240,7 +240,7 @@ class GO2WTW(LeggedRobot):
             self.obs_history[i][env_ids] *= 0
         for i in range(self.critic_history.maxlen):
             self.critic_history[i][env_ids] *= 0
-        
+
         # resample domain randomization parameters
         self._episodic_domain_randomization(env_ids)
 
@@ -257,7 +257,7 @@ class GO2WTW(LeggedRobot):
                 (len(env_ids), 1), device=self.device
             )
             # Theta, gait offset
-            selected_idx = torch.randint(0, len(self.cfg.rewards.periodic_reward_framework.theta_fl_list), 
+            selected_idx = torch.randint(0, len(self.cfg.rewards.periodic_reward_framework.theta_fl_list),
                                          (1,), device=self.device)
             self.theta[env_ids, 0] = self.cfg.rewards.periodic_reward_framework.theta_fl_list[selected_idx]
             self.theta[env_ids, 1] = self.cfg.rewards.periodic_reward_framework.theta_fr_list[selected_idx]
@@ -279,7 +279,7 @@ class GO2WTW(LeggedRobot):
                 self.cfg.rewards.behavior_params_range.foot_clearance_target_range[1],
                 (len(env_ids), 1), device=self.device
             )
-        
+
         if torch.mean(self.episode_sums["orientation"][env_ids]) / \
             self.max_episode_length > 0.75 * self.reward_scales["orientation"]:
             self.pitch_target[env_ids, :] = gs_rand_float(
@@ -289,13 +289,13 @@ class GO2WTW(LeggedRobot):
             )
 
     # ------------- Callbacks --------------
-    
+
     def _calc_periodic_reward_obs(self):
         """Calculate the periodic reward observations.
         """
         for i in range(4):
             self.clock_input[:, i] = torch.sin(2 * torch.pi * (self.phi + self.theta[:, i].unsqueeze(1))).squeeze(-1)
-    
+
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         env_ids = (self.episode_length_buf % int(
@@ -404,12 +404,12 @@ class GO2WTW(LeggedRobot):
                 self.foot_index_rl = self.feet_indices[i]
             elif "RR" in self.feet_names[i]:
                 self.foot_index_rr = self.feet_indices[i]
-    
+
     def _init_domain_params(self):
         super()._init_domain_params()
         self._kp_scale = torch.ones(self.num_envs, self.num_actions, dtype=gs.tc_float, device=self.device)
         self._kd_scale = torch.ones(self.num_envs, self.num_actions, dtype=gs.tc_float, device=self.device)
-    
+
     def _episodic_domain_randomization(self, env_ids):
         """ Update scale of Kp, Kd, rfi lim"""
         if len(env_ids) == 0:
@@ -421,7 +421,7 @@ class GO2WTW(LeggedRobot):
             self._kd_scale[env_ids] = gs_rand_float(
                 self.cfg.domain_rand.kd_range[0], self.cfg.domain_rand.kd_range[1], (len(env_ids), self.num_actions), device=self.device)
 
-            
+
     def _parse_cfg(self, cfg):
         super()._parse_cfg(cfg)
         # Periodic Reward Framework. Constants are init here.
@@ -429,7 +429,7 @@ class GO2WTW(LeggedRobot):
         self.gait_function_type = self.cfg.rewards.periodic_reward_framework.gait_function_type
         self.a_swing = 0.0
         self.b_stance = 2 * torch.pi
-    
+
     def _uniped_periodic_gait(self, foot_type):
         # q_frc and q_spd
         if foot_type == "FL":
@@ -459,20 +459,20 @@ class GO2WTW(LeggedRobot):
             q_spd = torch.norm(self.feet_vel[:, 3, :], dim=-1).view(-1, 1)
             # modulo phi over 1.0 to get cicular phi in [0, 1.0]
             phi = (self.phi + self.theta[:, 3].unsqueeze(1)) % 1.0
-        
+
         phi *= 2 * torch.pi  # convert phi to radians
-        
+
         if self.gait_function_type == "smooth":
             # coefficient
             c_swing_spd = 0  # speed is not penalized during swing phase
             c_swing_frc = -1  # force is penalized during swing phase
             c_stance_spd = -1  # speed is penalized during stance phase
             c_stance_frc = 0  # force is not penalized during stance phase
-            
+
             # clip the value of phi to [0, 1.0]. The vonmises function in scipy may return cdf outside [0, 1.0]
-            F_A_swing = torch.clip(torch.tensor(vonmises.cdf(loc=self.a_swing, 
+            F_A_swing = torch.clip(torch.tensor(vonmises.cdf(loc=self.a_swing,
                 kappa=self.kappa, x=phi.cpu()), device=self.device), 0.0, 1.0)
-            F_B_swing = torch.clip(torch.tensor(vonmises.cdf(loc=self.b_swing.cpu(), 
+            F_B_swing = torch.clip(torch.tensor(vonmises.cdf(loc=self.b_swing.cpu(),
                 kappa=self.kappa, x=phi.cpu()), device=self.device), 0.0, 1.0)
             F_A_stance = F_B_swing
             F_B_stance = torch.clip(torch.tensor(vonmises.cdf(loc=self.b_stance,
@@ -498,15 +498,14 @@ class GO2WTW(LeggedRobot):
                 (-0.5 - exp_C_frc_ori[indices_in_swing])
 
             # Judge if it's the standing gait
-            is_standing = (self.b_swing[:] == self.a_swing).nonzero(
-                as_tuple=False).flatten()
+            is_standing = (self.b_swing[:] == self.a_swing).nonzero(as_tuple=False).flatten()
             exp_C_frc[is_standing] = 0
             exp_C_spd[is_standing] = -1
         elif self.gait_function_type == "step":
             ''' ***** Step Gait Indicator ***** '''
             exp_C_frc = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
             exp_C_spd = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
-            
+
             swing_indices = (phi >= self.a_swing) & (phi < self.b_swing)
             swing_indices = swing_indices.nonzero(as_tuple=False).flatten()
             stance_indices = (phi >= self.b_swing) & (phi < self.b_stance)
@@ -516,23 +515,25 @@ class GO2WTW(LeggedRobot):
             exp_C_frc[stance_indices, :] = 0
             exp_C_spd[stance_indices, :] = -1
 
+        not_moving = torch.norm(self.commands[:, :2], dim=1) < 0.1
+        not_moving_idx = not_moving.nonzero(as_tuple=False).flatten()
+        exp_C_frc[not_moving_idx, :] = 0
+        exp_C_spd[not_moving_idx, :] = -1
+
+
         return exp_C_spd * q_spd + exp_C_frc * q_frc, \
             exp_C_spd.type(dtype=torch.float), exp_C_frc.type(dtype=torch.float)
-    
+
     def _reward_quad_periodic_gait(self):
-        quad_reward_fl, self.exp_C_spd_fl, self.exp_C_frc_fl = self._uniped_periodic_gait(
-            "FL")
-        quad_reward_fr, self.exp_C_spd_fr, self.exp_C_frc_fr = self._uniped_periodic_gait(
-            "FR")
-        quad_reward_rl, self.exp_C_spd_rl, self.exp_C_frc_rl = self._uniped_periodic_gait(
-            "RL")
-        quad_reward_rr, self.exp_C_spd_rr, self.exp_C_frc_rr = self._uniped_periodic_gait(
-            "RR")
+        quad_reward_fl, self.exp_C_spd_fl, self.exp_C_frc_fl = self._uniped_periodic_gait("FL")
+        quad_reward_fr, self.exp_C_spd_fr, self.exp_C_frc_fr = self._uniped_periodic_gait("FR")
+        quad_reward_rl, self.exp_C_spd_rl, self.exp_C_frc_rl = self._uniped_periodic_gait("RL")
+        quad_reward_rr, self.exp_C_spd_rr, self.exp_C_frc_rr = self._uniped_periodic_gait("RR")
         # reward for the whole body
         quad_reward = quad_reward_fl.flatten() + quad_reward_fr.flatten() + \
             quad_reward_rl.flatten() + quad_reward_rr.flatten()
         return torch.exp(quad_reward)
-    
+
     def _reward_hip_pos(self):
         """ Reward for the hip joint position close to default position
         """
@@ -540,14 +541,14 @@ class GO2WTW(LeggedRobot):
         dof_pos_error = torch.sum(torch.square(
             self.dof_pos[:, hip_joint_indices] - self.default_dof_pos[hip_joint_indices]), dim=-1)
         return dof_pos_error
-    
+
     def _reward_tracking_base_height(self):
         # Penalize base height away from target
         base_height = torch.mean(self.base_pos[:, 2].unsqueeze(
             1) - self.measured_heights, dim=1)
         rew = torch.square(base_height - self.base_height_target.squeeze(1))
         return torch.exp(-rew / self.cfg.rewards.base_height_tracking_sigma)
-    
+
     def _reward_foot_clearance(self):
         """
         Encourage feet to be close to desired height while swinging

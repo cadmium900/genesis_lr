@@ -26,13 +26,13 @@ class GO2(LeggedRobot):
         Args:
             env_ids (List[int]): Environemnt ids
         """
-        
+
         dof_pos = torch.zeros((len(envs_idx), self.num_actions), dtype=gs.tc_float, device=self.device)
         dof_pos[:, [0, 3, 6, 9]] = self.default_dof_pos[[0, 3, 6, 9]] + gs_rand_float(-0.2, 0.2, (len(envs_idx), 4), self.device)
         dof_pos[:, [1, 4, 7, 10]] = self.default_dof_pos[[0, 1, 4, 7]] + gs_rand_float(-0.4, 0.4, (len(envs_idx), 4), self.device)
         dof_pos[:, [2, 5, 8, 11]] = self.default_dof_pos[[0, 2, 5, 8]] + gs_rand_float(-0.4, 0.4, (len(envs_idx), 4), self.device)
         self.dof_pos[envs_idx] = dof_pos
-        
+
         self.dof_vel[envs_idx] = 0.0
         self.robot.set_dofs_position(
             position=self.dof_pos[envs_idx],

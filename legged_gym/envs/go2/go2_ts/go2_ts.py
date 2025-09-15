@@ -108,14 +108,14 @@ class Go2TS(LeggedRobot):
             self.privileged_obs_buf = torch.cat(
                 (
                     self.base_lin_vel * self.obs_scales.lin_vel,  # 3
-                    (self._friction_values - 
+                    (self._friction_values -
                      self.friction_value_offset), # 1
                     self._added_base_mass,        # 1
                     self._base_com_bias,          # 3
                     self._rand_push_vels[:, :2],  # 2
-                    (self._kp_scale - 
+                    (self._kp_scale -
                      self.kp_scale_offset),       # num_actions
-                    (self._kd_scale - 
+                    (self._kd_scale -
                      self.kd_scale_offset),       # num_actions
                     self._joint_armature,         # 1
                     self._joint_stiffness,        # 1
@@ -166,7 +166,7 @@ class Go2TS(LeggedRobot):
         self.num_history_obs = self.cfg.env.num_history_obs
         self.num_latent_dims = self.cfg.env.num_latent_dims
         # determine privileged observation offset to normalize privileged observations
-        self.friction_value_offset = (self.cfg.domain_rand.friction_range[0] + 
+        self.friction_value_offset = (self.cfg.domain_rand.friction_range[0] +
                                       self.cfg.domain_rand.friction_range[1]) / 2  # mean value
         self.kp_scale_offset = (self.cfg.domain_rand.kp_range[0] +
                                 self.cfg.domain_rand.kp_range[1]) / 2  # mean value

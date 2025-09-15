@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -42,6 +42,13 @@ from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
 
+import os, platform
+
+def is_wsl():
+    return platform.system() == "Linux" and "microsoft" in platform.release().lower()
+
+if os.name == "nt" and not is_wsl():
+    import msvcrt
 
 class OnPolicyRunner:
 
@@ -65,7 +72,7 @@ class OnPolicyRunner:
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
-            num_critic_obs = self.env.num_privileged_obs 
+            num_critic_obs = self.env.num_privileged_obs
         else:
             num_critic_obs = self.env.num_obs
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
@@ -89,7 +96,7 @@ class OnPolicyRunner:
         self.current_learning_iteration = 0
 
         _, _ = self.env.reset()
-    
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
         if self.log_dir is not None and self.writer is None:
@@ -120,12 +127,24 @@ class OnPolicyRunner:
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
+
+                    # Check for Nan
+                    if not torch.isfinite(obs).all():
+                        print("Bad OBS, fixing...")
+                        bad_envs = torch.unique(torch.where(~torch.isfinite(obs))[0])
+                        # if your vecenv supports per-env reset:
+                        try:
+                            self.env.reset_idx(bad_envs)  # or reset_envs()
+                            obs = self.env.obs_buf  # refresh obs after reset if needed
+                        except Exception:
+                            # temporary stopgap to avoid crash
+                            obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
                     actions = self.alg.act(obs, critic_obs)
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                     self.alg.process_env_step(rewards, dones, infos)
-                    
+
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
@@ -144,16 +163,33 @@ class OnPolicyRunner:
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs)
-            
+
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
-            if it % self.save_interval == 0:
+
+            rq_quit = False
+            rq_save = False
+            if os.name == "nt" and not is_wsl():
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch().lower()
+                    if ch == 'q':
+                        rq_quit = True
+                        print("\n[Quit Requested]")
+                        break
+                    elif ch == 's':
+                        rq_save = True
+                        print("\n[Save Requested]")
+
+            if rq_save or rq_quit or (it % self.save_interval == 0):
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
-        
+
+            if rq_quit:
+                break
+
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
@@ -175,7 +211,7 @@ class OnPolicyRunner:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.6f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
@@ -218,12 +254,15 @@ class OnPolicyRunner:
                         #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 
         log_string += ep_string
+        eta_sec = self.tot_time / (locs['it'] + 1) * (locs['num_learning_iterations'] - locs['it'])
+        eta_hour = eta_sec / 3600.0
         log_string += (f"""{'-' * width}\n"""
                        f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
                        f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
                        f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
-                       f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
-                               locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
+                       f"""{'ETA:':>{pad}} {eta_sec:.1f}s {eta_hour:.1f}h\n"""
+                       )
+
         print(log_string)
 
     def save(self, path, infos=None):

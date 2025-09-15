@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -86,7 +86,7 @@ class ActorCritic(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
-        
+
         # seems that we get better performance without init
         # self.init_memory_weights(self.memory_a, 0.001, 0.)
         # self.init_memory_weights(self.memory_c, 0.001, 0.)
@@ -103,7 +103,7 @@ class ActorCritic(nn.Module):
 
     def forward(self):
         raise NotImplementedError
-    
+
     @property
     def action_mean(self):
         return self.distribution.mean
@@ -111,7 +111,7 @@ class ActorCritic(nn.Module):
     @property
     def action_std(self):
         return self.distribution.stddev
-    
+
     @property
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
@@ -123,7 +123,7 @@ class ActorCritic(nn.Module):
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         return self.distribution.sample()
-    
+
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
