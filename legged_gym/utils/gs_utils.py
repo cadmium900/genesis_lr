@@ -7,6 +7,26 @@ def wrap_to_pi(angles):
     angles -= 2 * np.pi * (angles > np.pi)
     return angles
 
+def vec_direction(a, b):
+    """
+    Unit direction vector pointing from a -> b.
+    a, b: Tensors of shape (..., 3) representing points in 3D space.
+    Returns:
+        Tensor of shape (..., 3) representing the unit direction vectors.
+    """
+    # Compute the difference (b - a)
+    diff = b - a
+
+    # Compute the norm of the difference
+    norm = torch.linalg.norm(diff, dim=-1, keepdim=True)
+
+    # Avoid division by zero by setting zero norms to 1 (or handle as needed)
+    norm = torch.where(norm == 0, torch.tensor(1.0, device=diff.device, dtype=diff.dtype), norm)
+
+    # Compute the unit direction vector
+    unit_direction = diff / norm
+
+    return unit_direction
 
 def gs_rand_float(lower, upper, shape, device):
     return (upper - lower) * torch.rand(size=shape, device=device) + lower
@@ -17,12 +37,90 @@ def gs_inv_quat(quat):
     inv_quat = torch.stack([1.0 * qw, -qx, -qy, -qz], dim=-1)
     return inv_quat
 
+def angle_between_vectors(a, b, eps=1e-8):
+    a_norm = normalize(a, eps)
+    b_norm = normalize(b, eps)
+    cos = (a_norm * b_norm).sum(dim=-1)                 # [N]
+    cos = cos.clamp(-1.0 + eps, 1.0 - eps)
+    return torch.acos(cos)
+
+def rotation_matrix_between_vectors(a, b, eps=1e-8):
+    """
+    Compute the rotation matrix that rotates vector `a` to vector `b`.
+
+    Args:
+        a (torch.Tensor): Tensor of shape (..., 3), the source vector(s).
+        b (torch.Tensor): Tensor of shape (..., 3), the target vector(s).
+        eps (float): Small value to avoid division by zero.
+
+    Returns:
+        torch.Tensor: Rotation matrix of shape (..., 3, 3).
+    """
+    # Normalize the input vectors
+    a_norm = normalize(a, eps)
+    b_norm = normalize(b, eps)
+
+    # Compute the axis of rotation (cross product)
+    axis = torch.cross(a_norm, b_norm, dim=-1)
+
+    # Compute the angle of rotation (dot product)
+    cos_theta = torch.sum(a_norm * b_norm, dim=-1).clamp(-1.0 + eps, 1.0 - eps)
+    theta = torch.acos(cos_theta)
+
+    # Compute the skew-symmetric cross-product matrix of the axis
+    axis_norm = normalize(axis, eps)
+    x, y, z = axis_norm.unbind(-1)
+    skew_sym = torch.stack([
+        torch.stack([torch.zeros_like(x), -z, y], dim=-1),
+        torch.stack([z, torch.zeros_like(x), -x], dim=-1),
+        torch.stack([-y, x, torch.zeros_like(x)], dim=-1),
+    ], dim=-2)
+
+    # Compute the rotation matrix using Rodrigues' rotation formula
+    identity = torch.eye(3, device=a.device, dtype=a.dtype).expand_as(skew_sym)
+    sin_theta = torch.sin(theta).unsqueeze(-1).unsqueeze(-1)
+    cos_theta = torch.cos(theta).unsqueeze(-1).unsqueeze(-1)
+    rotation_matrix = identity + sin_theta * skew_sym + (1 - cos_theta) * torch.matmul(skew_sym, skew_sym)
+
+    return rotation_matrix
+
+def angle_on_plane(rotation_matrix, plane="XZ", eps=1e-8):
+    """
+    Extract the angle of rotation on a specified plane (e.g., XZ, XY, YZ) from a rotation matrix.
+
+    Args:
+        rotation_matrix (torch.Tensor): Tensor of shape (..., 3, 3), the rotation matrix.
+        plane (str): The plane on which to compute the angle ("XZ", "XY", or "YZ").
+        eps (float): Small value to avoid division by zero.
+
+    Returns:
+        torch.Tensor: The angle on the specified plane in radians. Shape: (...).
+    """
+    # Define the plane indices
+    if plane == "XZ":
+        axis1, axis2 = 0, 2  # X and Z axes
+    elif plane == "XY":
+        axis1, axis2 = 0, 1  # X and Y axes
+    elif plane == "YZ":
+        axis1, axis2 = 1, 2  # Y and Z axes
+    else:
+        raise ValueError(f"Invalid plane '{plane}'. Choose from 'XZ', 'XY', or 'YZ'.")
+
+    # Extract the relevant 2D rotation components from the rotation matrix
+    vec1 = rotation_matrix[..., axis1, axis1]
+    vec2 = rotation_matrix[..., axis1, axis2]
+
+    # Compute the angle using atan2
+    angle = torch.atan2(vec2, vec1)
+
+    return angle
+
 def quat_rotate(q, v):
     """
     Rotate vector(s) v by quaternion(s) q (wxyz order).
     q: [N,4], v: [N,3] -> returns [N,3]
     """
-    q = F.normalize(q, dim=-1)
+    q = normalize(q)
     w, x, y, z = q.unbind(-1)
     qv = torch.stack([x, y, z], dim=-1)                 # [N,3]
     t  = 2.0 * torch.cross(qv, v, dim=-1)               # [N,3]
@@ -121,7 +219,6 @@ def gs_quat_from_angle_axis(angle, axis):
 
 def normalize(x, eps: float = 1e-9):
     return x / x.norm(p=2, dim=-1).clamp(min=eps, max=None).unsqueeze(-1)
-
 
 def gs_quat_mul(a, b):
     assert a.shape == b.shape

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -33,7 +33,7 @@ import torch
 def split_and_pad_trajectories(tensor, dones):
     """ Splits trajectories at done indices. Then concatenates them and padds with zeros up to the length og the longest trajectory.
     Returns masks corresponding to valid parts of the trajectories
-    Example: 
+    Example:
         Input: [ [a1, a2, a3, a4 | a5, a6],
                  [b1, b2 | b3, b4, b5 | b6]
                 ]
@@ -43,8 +43,8 @@ def split_and_pad_trajectories(tensor, dones):
                  [b1, b2, 0, 0],   |    [True, True, False, False],
                  [b3, b4, b5, 0],  |    [True, True, True, False],
                  [b6, 0, 0, 0]     |    [True, False, False, False],
-                ]                  | ]    
-            
+                ]                  | ]
+
     Assumes that the inputy has the following dimension order: [time, number of envs, aditional dimensions]
     """
     dones = dones.clone()

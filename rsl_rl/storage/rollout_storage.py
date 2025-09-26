@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -30,7 +30,7 @@
 
 import torch
 import numpy as np
-
+import genesis as gs
 from rsl_rl.utils import split_and_pad_trajectories
 
 class RolloutStorage:
@@ -46,7 +46,7 @@ class RolloutStorage:
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
-        
+
         def clear(self):
             self.__init__()
 
@@ -107,7 +107,7 @@ class RolloutStorage:
         hid_a = hidden_states[0] if isinstance(hidden_states[0], tuple) else (hidden_states[0],)
         hid_c = hidden_states[1] if isinstance(hidden_states[1], tuple) else (hidden_states[1],)
 
-        # initialize if needed 
+        # initialize if needed
         if self.saved_hidden_states_a is None:
             self.saved_hidden_states_a = [torch.zeros(self.observations.shape[0], *hid_a[i].shape, device=self.device) for i in range(len(hid_a))]
             self.saved_hidden_states_c = [torch.zeros(self.observations.shape[0], *hid_c[i].shape, device=self.device) for i in range(len(hid_c))]
@@ -186,9 +186,9 @@ class RolloutStorage:
     def reccurent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
 
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
-        if self.privileged_observations is not None: 
+        if self.privileged_observations is not None:
             padded_critic_obs_trajectories, _ = split_and_pad_trajectories(self.privileged_observations, self.dones)
-        else: 
+        else:
             padded_critic_obs_trajectories = padded_obs_trajectories
 
         mini_batch_size = self.num_envs // num_mini_batches
@@ -199,12 +199,12 @@ class RolloutStorage:
                 stop = (i+1)*mini_batch_size
 
                 dones = self.dones.squeeze(-1)
-                last_was_done = torch.zeros_like(dones, dtype=torch.bool)
+                last_was_done = torch.zeros_like(dones, dtype=gs.tc_bool)
                 last_was_done[1:] = dones[:-1]
                 last_was_done[0] = True
                 trajectories_batch_size = torch.sum(last_was_done[:, start:stop])
                 last_traj = first_traj + trajectories_batch_size
-                
+
                 masks_batch = trajectory_masks[:, first_traj:last_traj]
                 obs_batch = padded_obs_trajectories[:, first_traj:last_traj]
                 critic_obs_batch = padded_critic_obs_trajectories[:, first_traj:last_traj]
@@ -222,7 +222,7 @@ class RolloutStorage:
                 # take a batch of trajectories and finally reshape back to [num_layers, batch, hidden_dim]
                 last_was_done = last_was_done.permute(1, 0)
                 hid_a_batch = [ saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj].transpose(1, 0).contiguous()
-                                for saved_hidden_states in self.saved_hidden_states_a ] 
+                                for saved_hidden_states in self.saved_hidden_states_a ]
                 hid_c_batch = [ saved_hidden_states.permute(2, 0, 1, 3)[last_was_done][first_traj:last_traj].transpose(1, 0).contiguous()
                                 for saved_hidden_states in self.saved_hidden_states_c ]
                 # remove the tuple for GRU
@@ -231,5 +231,5 @@ class RolloutStorage:
 
                 yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, \
                        old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (hid_a_batch, hid_c_batch), masks_batch
-                
+
                 first_traj = last_traj

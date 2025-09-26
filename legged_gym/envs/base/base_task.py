@@ -8,7 +8,7 @@ import genesis as gs
 class BaseTask():
 
     def __init__(self, cfg, sim_device, headless):
-        
+
         self.render_fps = 50
         self.last_frame_time = 0
 
@@ -16,7 +16,8 @@ class BaseTask():
             self.device = torch.device('cpu')
         else:
             assert sim_device in ["cpu", "cuda"]
-            self.device = torch.device(sim_device)
+            self.device = torch.device(gs.device) if sim_device == "cuda" else torch.device("cpu")
+            #self.device = torch.device(sim_device)
         self.headless = headless
 
         self.num_envs = 1 if cfg.env.num_envs == 0 else cfg.env.num_envs
@@ -33,16 +34,16 @@ class BaseTask():
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_int)
         if self.num_privileged_obs is not None:
             self.privileged_obs_buf = torch.zeros(self.num_envs, self.num_privileged_obs, device=self.device, dtype=gs.tc_float)
-        else: 
+        else:
             self.privileged_obs_buf = None
 
         self.extras = {}
-        
+
         self.create_sim()
 
     def get_observations(self):
         return self.obs_buf
-    
+
     def get_privileged_observations(self):
         return self.privileged_obs_buf
 

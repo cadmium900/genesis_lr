@@ -39,6 +39,7 @@ import torch
 from rsl_rl.algorithms import PPO_TS
 from rsl_rl.modules import ActorCriticTS
 from rsl_rl.env import VecEnv
+import genesis as gs
 
 
 class TSRunner:
@@ -93,8 +94,8 @@ class TSRunner:
         ep_infos = []
         rewbuffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=gs.tc_float, device=self.device)
+        cur_episode_length = torch.zeros(self.env.num_envs, dtype=gs.tc_float, device=self.device)
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
