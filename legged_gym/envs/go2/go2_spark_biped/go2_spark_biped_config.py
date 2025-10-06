@@ -24,11 +24,11 @@ class GO2SparkBipedCfg(BaseConfig):
         horizontal_scale = 0.1 # [m]
         vertical_scale = 0.005 # [m]
         border_size = 5 # [m]
-        curriculum = False
+        curriculum = True
         friction = 1.0
         restitution = 0.
         # rough terrain only:
-        measure_heights = False
+        measure_heights = True
         measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] # 1mx1.6m rectangle (without center line)
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
         selected = False # select a unique terrain type and pass all arguments
@@ -53,7 +53,8 @@ class GO2SparkBipedCfg(BaseConfig):
         curriculum_front_feet_thrs = 0.8
         curriculum_orientation_thrs = 0.8
         curriculum_threshold = 0.8
-        min_normal = 0.20
+        min_normal = 0.05
+        foot_step_distance = 0.20
         class ranges:
             lin_vel_x = [0.0, 0.4]
             lin_vel_y = [-0.1, 0.1]
@@ -129,7 +130,7 @@ class GO2SparkBipedCfg(BaseConfig):
         push_interval_s = 15
         max_push_vel_xy = 1.
         randomize_com_displacement = enable
-        com_displacement_range = [-0.05, 0.05]
+        com_displacement_range = [-0.10, 0.10]
         randomize_ctrl_delay = False
         ctrl_delay_step_range = [0, 1]
         randomize_pd_gain = enable
@@ -141,16 +142,16 @@ class GO2SparkBipedCfg(BaseConfig):
         joint_stiffness_range = [0.01, 0.02]
         randomize_joint_damping = enable
         joint_damping_range = [0.25, 0.3]
-        termination_z = 0.05 # 0.8
+        termination_z = -0.05 # 0.8
 
     class rewards:
         soft_dof_pos_limit = 0.9
+        soft_dof_vel_limit = 1.
         foot_height_offset = 0.022 # height of the foot coordinate origin above ground [m]
-        euler_tracking_sigma = 0.5
+        euler_tracking_sigma = 0.05
         only_positive_rewards = True
-        tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
+        tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
         soft_torque_limit = 1.
-        base_height_target = 0.8
         foot_clearance_tracking_sigma = 0.01
         base_height_tracking_sigma = 0.25
         front_arm_angle_sigma = 0.5
@@ -158,35 +159,34 @@ class GO2SparkBipedCfg(BaseConfig):
         calf_angle_sigma = 0.5
 
         class scales:
-            front_feet_off = 1.0
-            front_feet_on_ground_push = 0.15
-            hind_alternation = 0.7
-            com_over_support = 0.5
-            tracking_lin_vel = 1.5
+            front_feet_off = 0.6
+            front_feet_on_ground_push = 0.0025
+            hind_alternation = 0.8
+            com_over_support = 1.0
+            tracking_lin_vel = 0.9
             tracking_ang_vel = 0.65
-            orientation = 1.0
-            base_height = 0.7
+            orientation = 0.9
+            base_height = 0.8
             hind_foot_clearance = 0.5
-            front_arm_angle = 0.7
-            #thigh_angle = 0.75
-            #calf_angle = 0.75
+            front_arm_angle = 0.17
+            foot_step = 1.1
 
             dof_pos_limits = -10.0
             collision = -1.0
-            ang_vel_xy = -0.05
             dof_vel = -5e-4
             dof_acc = -2e-7
             action_rate = -0.003
             action_smoothness = -0.03
-            hip_pos = -1.0
+            hip_pos = -0.5
+            #pitch_rate = -0.5
             termination = -0.0
 
         class behavior_params_range:
             resampling_time = 6.0
-            gait_period_range = [0.40, 0.55]
-            foot_clearance_target_range = [0.06, 0.9]
-            base_height_target_range = [0.40, 0.60]
-            pitch_target_range = [0.9, 1.0]
+            gait_period_range = [0.40, 0.60]
+            foot_clearance_target_range = [0.06, 0.19]
+            base_height_target_range = [0.30, 0.90]
+            pitch_target_range = [1.0, 1.0]
 
     class normalization:
         class obs_scales:
@@ -204,8 +204,8 @@ class GO2SparkBipedCfg(BaseConfig):
         class noise_scales:
             dof_pos = 0.03
             dof_vel = 0.5
-            lin_vel = 0.1
-            ang_vel = 0.2
+            lin_vel = 0.05
+            ang_vel = 0.1
             gravity = 0.05
             height_measurements = 0.1
 
@@ -252,7 +252,7 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Sep25_18-01-16_spark"
+        load_run = "Oct05_12-54-21_spark"
         checkpoint = -1
         max_iterations = 4000
         num_steps_per_env = 24
