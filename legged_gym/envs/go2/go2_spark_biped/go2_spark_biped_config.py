@@ -10,13 +10,13 @@ class GO2SparkBipedCfg(BaseConfig):
         # observation history
         frame_stack = 5   # policy frame stack
         c_frame_stack = 5  # critic frame stack
-        num_single_obs = 57
+        num_single_obs = 61
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 94
+        single_num_privileged_obs = 98
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
-        debug_viz = True
+        debug_viz = False
 
     class terrain:
         mesh_type = 'plane' # "heightfield" # none, plane, heightfield
@@ -115,7 +115,7 @@ class GO2SparkBipedCfg(BaseConfig):
             'RL_calf_joint',]
         foot_name = ["foot"]
         penalize_contacts_on = ["thigh", "calf", "hip", "base"]
-        terminate_after_contacts_on = ["base", "calf"]
+        terminate_after_contacts_on = ["base", "calf", "thigh", "hip"]
         links_to_keep = ['FL_foot', 'FR_foot', 'RL_foot', 'RR_foot']
         self_collisions = True
         fix_base_link = False
@@ -130,12 +130,12 @@ class GO2SparkBipedCfg(BaseConfig):
         push_interval_s = 15
         max_push_vel_xy = 1.
         randomize_com_displacement = enable
-        com_displacement_range = [-0.10, 0.10]
+        com_displacement_range = [-0.07, 0.07]
         randomize_ctrl_delay = False
         ctrl_delay_step_range = [0, 1]
         randomize_pd_gain = enable
-        kp_range = [0.8, 1.2]
-        kd_range = [0.8, 1.2]
+        kp_range = [0.7, 1.2]
+        kd_range = [0.8, 1.5]
         randomize_joint_armature = enable
         joint_armature_range = [0.015, 0.025]  # [N*m*s/rad]
         randomize_joint_stiffness = enable
@@ -152,24 +152,26 @@ class GO2SparkBipedCfg(BaseConfig):
         only_positive_rewards = True
         tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
         soft_torque_limit = 1.
-        foot_clearance_tracking_sigma = 0.01
+        foot_clearance_tracking_sigma = 0.1
         base_height_tracking_sigma = 0.25
         front_arm_angle_sigma = 0.5
         thigh_angle_sigma = 0.5
         calf_angle_sigma = 0.5
+        arm_angle_sigma = 0.5
 
         class scales:
-            front_feet_off = 0.6
+            front_feet_off = 0.8
             front_feet_on_ground_push = 0.0025
-            hind_alternation = 0.8
-            com_over_support = 1.0
-            tracking_lin_vel = 0.9
-            tracking_ang_vel = 0.65
-            orientation = 0.9
-            base_height = 0.8
+            hind_alternation = 0.9
+            com_over_support = 0.75
+            tracking_lin_vel = 1.5
+            tracking_ang_vel = 0.8
+            orientation = 1.0
+            base_height_target = 0.8
             hind_foot_clearance = 0.5
-            front_arm_angle = 0.17
-            foot_step = 1.1
+            #front_arm_angle = 0.17
+            arm_angles = 0.5
+           # foot_step = 1.1
 
             dof_pos_limits = -10.0
             collision = -1.0
@@ -178,14 +180,14 @@ class GO2SparkBipedCfg(BaseConfig):
             action_rate = -0.003
             action_smoothness = -0.03
             hip_pos = -0.5
-            #pitch_rate = -0.5
+            pitch_rate = -10.0
             termination = -0.0
 
         class behavior_params_range:
             resampling_time = 6.0
             gait_period_range = [0.40, 0.60]
             foot_clearance_target_range = [0.06, 0.19]
-            base_height_target_range = [0.30, 0.90]
+            base_height_target_range = [0.50, 0.65]
             pitch_target_range = [1.0, 1.0]
 
     class normalization:
@@ -204,8 +206,8 @@ class GO2SparkBipedCfg(BaseConfig):
         class noise_scales:
             dof_pos = 0.03
             dof_vel = 0.5
-            lin_vel = 0.05
-            ang_vel = 0.1
+            lin_vel = 0.1
+            ang_vel = 0.2
             gravity = 0.05
             height_measurements = 0.1
 
@@ -252,10 +254,10 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Oct05_12-54-21_spark"
+        load_run = "Oct10_22-38-34_spark"
         checkpoint = -1
-        max_iterations = 4000
-        num_steps_per_env = 24
+        max_iterations = 5000
+        num_steps_per_env = 32
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         # load and resume
