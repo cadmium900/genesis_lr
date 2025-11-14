@@ -58,7 +58,7 @@ class GO2SparkBiped(BaseTask):
             rigid_options=gs.options.RigidOptions(
                 dt=self.sim_dt,
                 constraint_solver=gs.constraint_solver.Newton,
-                constraint_timeconst=0.01,
+                #constraint_timeconst=0.01,
                 enable_collision=True,
                 enable_joint_limit=True,
                 enable_self_collision=self.cfg.asset.self_collisions,
@@ -427,6 +427,13 @@ class GO2SparkBiped(BaseTask):
         proj_grav_over_limit = self.base_axis_fwd[:, 2] < self.termination_z # 0.6
         self.reset_buf |= proj_grav_over_limit
 
+        # pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
+        # pitch_reset = torch.logical_and(
+        #     pitch_error < 0.3,
+        #     self.episode_length_buf > self.max_episode_length * 0.1,
+        # )
+        # self.reset_buf |= pitch_reset
+
 
     def compute_reward(self):
         """ Compute rewards
@@ -771,15 +778,23 @@ class GO2SparkBiped(BaseTask):
             # set small commands to zero
             self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > self.cfg.commands.min_normal).unsqueeze(1)
 
-            self.arm_left_target[:, :3] = self.dof_pos_limits[self.dof_arm_left_idx, 0] + (self.dof_pos_limits[self.dof_arm_left_idx, 1] - self.dof_pos_limits[self.dof_arm_left_idx, 0]) * torch.rand((self.num_envs,3), device=self.device)
-            self.arm_right_target[:, :3] = self.dof_pos_limits[self.dof_arm_right_idx, 0] + (self.dof_pos_limits[self.dof_arm_right_idx, 1] - self.dof_pos_limits[self.dof_arm_right_idx, 0]) * torch.rand((self.num_envs,3), device=self.device)
+            rand_left = torch.rand((len(env_ids), 3), device=self.device)
+            rand_right = torch.rand((len(env_ids), 3), device=self.device)
+            self.arm_left_target[env_ids, :3] = (
+                self.dof_pos_limits[self.dof_arm_left_idx, 0]
+                + (self.dof_pos_limits[self.dof_arm_left_idx, 1] - self.dof_pos_limits[self.dof_arm_left_idx, 0]) * rand_left
+            )
+            self.arm_right_target[env_ids, :3] = (
+                self.dof_pos_limits[self.dof_arm_right_idx, 0]
+                + (self.dof_pos_limits[self.dof_arm_right_idx, 1] - self.dof_pos_limits[self.dof_arm_right_idx, 0]) * rand_right
+            )
 
         else:
             self.commands[env_ids, :3] = 0.0
             self.pitch_target[env_ids, :] = self.fixed_pitch_target[env_ids, :]
 
-            self.arm_left_target[:, :3] = self.dof_pos_limits[self.dof_arm_left_idx, 0] + (self.dof_pos_limits[self.dof_arm_left_idx, 1] - self.dof_pos_limits[self.dof_arm_left_idx, 0]) * 0.5
-            self.arm_right_target[:, :3] = self.dof_pos_limits[self.dof_arm_right_idx, 0] + (self.dof_pos_limits[self.dof_arm_right_idx, 1] - self.dof_pos_limits[self.dof_arm_right_idx, 0]) * 0.5
+            self.arm_left_target[env_ids, :3] = self.dof_pos_limits[self.dof_arm_left_idx, 0] + (self.dof_pos_limits[self.dof_arm_left_idx, 1] - self.dof_pos_limits[self.dof_arm_left_idx, 0]) * 0.5
+            self.arm_right_target[env_ids, :3] = self.dof_pos_limits[self.dof_arm_right_idx, 0] + (self.dof_pos_limits[self.dof_arm_right_idx, 1] - self.dof_pos_limits[self.dof_arm_right_idx, 0]) * 0.5
 
 
     def _resample_behavior_params(self, env_ids):
@@ -1276,10 +1291,14 @@ class GO2SparkBiped(BaseTask):
 
     def _neg_reward_hip_pos(self):
         # Negative reward
-        hip_joint_indices = [0, 3, 6, 9]
-        dof_pos_error = torch.sum(torch.square(self.dof_pos[:, hip_joint_indices] - self.default_dof_pos[hip_joint_indices]), dim=-1)
+        hip_joint_indices_all = [0, 3, 6, 9]
+        hip_joint_indices_rear = [6, 9]
+        pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
+        # Only penalize hips joints rear when upright standing
+        dof_pos_error = torch.where(pitch_error < 0.2,
+                        torch.sum(torch.square(self.dof_pos[:, hip_joint_indices_rear] - self.default_dof_pos[hip_joint_indices_rear]), dim=-1),
+                        torch.sum(torch.square(self.dof_pos[:, hip_joint_indices_all] - self.default_dof_pos[hip_joint_indices_all]), dim=-1))
         return dof_pos_error
-
     # def _neg_reward_ang_vel_xy(self):
     #     # Penalize
     #     return torch.sum(torch.square(self.robot.get_ang()[:, 1:2]), dim=1)  # small penalty
@@ -1349,15 +1368,57 @@ class GO2SparkBiped(BaseTask):
     #     dof_pos_error = torch.sum(torch.abs(self.dof_pos[:, calfs_joint_indices] - calfs_dof_pos), dim=-1)
     #     return torch.exp(-dof_pos_error / self.cfg.rewards.calf_angle_sigma)
 
+    def _angle_diff(self, a, b):
+        # wrap to (-pi, pi]
+        return torch.atan2(torch.sin(a - b), torch.cos(a - b))
+
     def _reward_arm_angles(self):
-        arm_left_err = torch.sum(torch.square(self.dof_pos[:, self.dof_arm_left_idx] - self.arm_left_target[:, :3]), dim=-1)
-        arm_right_err = torch.sum(torch.square(self.dof_pos[:, self.dof_arm_right_idx] - self.arm_right_target[:, :3]), dim=-1)
-        return torch.exp(-(arm_left_err + arm_right_err) / self.cfg.rewards.arm_angle_sigma)
+        # ---- gather & validate shapes ----
+        left_pos  = self.dof_pos[:, self.dof_arm_left_idx]           # [N, JL]
+        right_pos = self.dof_pos[:, self.dof_arm_right_idx]          # [N, JR]
+        left_tgt  = self.arm_left_target[:, :left_pos.shape[1]]      # [N, JL]
+        right_tgt = self.arm_right_target[:, :right_pos.shape[1]]    # [N, JR]
+
+        # ---- wrap-aware per-joint errors ----
+        left_d   = self._angle_diff(left_pos,  left_tgt)
+        right_d  = self._angle_diff(right_pos, right_tgt)
+
+        # option A: cosine loss (bounded, wrap-safe)
+        # per-joint cost in [0, 2], small near 0
+        left_c   = 1.0 - torch.cos(left_d)
+        right_c  = 1.0 - torch.cos(right_d)
+
+        # average per joint so a single joint can't nuke the reward
+        left_err  = left_c.mean(dim=-1)      # [N]
+        right_err = right_c.mean(dim=-1)     # [N]
+        err = 0.5 * (left_err + right_err)   # [N]
+
+        # ---- shaping ----
+        # Choose ONE of the following:
+
+        # (1) Gaussian-like (use σ as a *scale* in same units as the cost above)
+        # Typical σ ~ 0.1–0.3 for cosine cost; tune.
+        sigma = self.cfg.rewards.arm_angle_sigma
+        reward = torch.exp(-err / (2.0 * sigma * sigma))
+
+        # (2) Smooth rational (less saturation, easier to tune)
+        # k ~ 5–20 sets “how sharp” the peak is.
+        # k = self.cfg.rewards.arm_angle_k
+        # reward = 1.0 / (1.0 + k * err)
+
+        return reward
 
     def _reward_orientation(self):
         pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
         tracking_reward = torch.exp(-pitch_error / self.cfg.rewards.euler_tracking_sigma)
         return tracking_reward
+
+    def _biped_orientation_gate(self):
+        # Gate shaping rewards: 1 when orientation far from target, 0 once aligned
+        target = self.fixed_pitch_target.squeeze(1)
+        error = torch.abs(self.base_axis_fwd[:, 2] - target)
+        window = max(self.cfg.rewards.biped_shaping_pitch_window, 1e-6)
+        return torch.clamp(error / window, 0.0, 1.0)
 
     def _reward_base_height_target(self):
         # Modulate base_height_target by pitch_error. Less errors == more toward base_height_target, less, move toward 0.5 * base_target
@@ -1392,7 +1453,9 @@ class GO2SparkBiped(BaseTask):
         f_fl = self._contact_mag(self.foot_index_fl)
         f_fr = self._contact_mag(self.foot_index_fr)
         x = f_fl + f_fr
-        return torch.exp(-(x*x)/500.0)
+        reward = torch.exp(-(x * x) / 500.0)
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.ones_like(reward), reward, gate)
 
     def _reward_front_feet_on_ground_push(self):
         # Get contact forces for the front left and front right feet
@@ -1421,22 +1484,6 @@ class GO2SparkBiped(BaseTask):
         # Apply reward only when in contact
         return rew
 
-    # def _reward_front_arm_angle(self):
-    #     pitch_err = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
-
-    #     inv_base_quat = gs_inv_quat(self.base_quat)
-    #     foot_fl_local = transform_by_quat(self.feet_pos[:, 0, :] - self.base_pos, inv_base_quat)
-    #     foot_fr_local = transform_by_quat(self.feet_pos[:, 1, :] - self.base_pos, inv_base_quat)
-
-    #     forward_local = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand_as(foot_fl_local)  # biped forward = -Z
-    #     angle_fl = angle_between_vectors(foot_fl_local, forward_local)
-    #     angle_fr = angle_between_vectors(foot_fr_local, forward_local)
-
-    #     angle_req = 10.0 * torch.pi / 180.0
-    #     #err = torch.where(pitch_err < 0.5, ((angle_fl - angle_req)**2 + (angle_fr - angle_req)**2), 0.0)
-    #     err = ((angle_fl - angle_req)**2 + (angle_fr - angle_req)**2)
-    #     return torch.exp(-err / self.cfg.rewards.front_arm_angle_sigma)
-
     def _reward_hind_alternation(self):
         # encourage alternating single support (one foot on, other off)
         f_rl = self._contact_mag(self.foot_index_rl) > 7.0
@@ -1461,7 +1508,7 @@ class GO2SparkBiped(BaseTask):
             )
         )
         rew_standing = 1.0*both - 0.8*none - 0.8*single
-        rew_moving = 1.0*single - 0.1*both - 0.1*none
+        rew_moving = 1.0*single - 0.3*both - 0.8*none
         rew = torch.where(moving, rew_moving, rew_standing)
 
         return rew
@@ -1484,4 +1531,6 @@ class GO2SparkBiped(BaseTask):
         # targets
         p_mid = 0.5*(p_rl + p_rr)
         d = torch.norm(com - p_mid, dim=-1)
-        return torch.exp(-(d*d) / 0.03)      # sigma ≈ 0.173 m
+        reward = torch.exp(-(d * d) / 0.03)      # sigma ≈ 0.173 m
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.ones_like(reward), reward, gate)

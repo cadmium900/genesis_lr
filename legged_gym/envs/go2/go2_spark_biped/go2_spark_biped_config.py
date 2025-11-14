@@ -4,7 +4,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
     class env:
         episode_length_s = 20 # episode length in seconds
-        num_envs = 4096
+        num_envs = 11000
         env_spacing = 1.0
         num_actions = 12
         # observation history
@@ -158,6 +158,10 @@ class GO2SparkBipedCfg(BaseConfig):
         thigh_angle_sigma = 0.5
         calf_angle_sigma = 0.5
         arm_angle_sigma = 0.5
+        biped_shaping_pitch_window = 0.35
+        biped_shaping_front_weight = 0.6
+        biped_shaping_com_weight = 0.4
+
 
         class scales:
             front_feet_off = 0.8
@@ -254,7 +258,7 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Oct10_22-38-34_spark"
+        load_run = "Nov13_23-39-46_spark"
         checkpoint = -1
         max_iterations = 5000
         num_steps_per_env = 32

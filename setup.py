@@ -9,7 +9,7 @@ setup(
     packages=find_packages(),
     author_email='jason_1120202397@163.com',
     description='Genesis environments for Legged Robots',
-    install_requires=['genesis-world',
+    install_requires=['genesis-world=0.3.0',
                       'torch',
                       'matplotlib',
                       'torchvision',

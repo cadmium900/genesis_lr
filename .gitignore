@@ -58,3 +58,7 @@ runs
 *.egg-info
 __pycache__
 wandb
+
+*.tic
+*.tcb
+*.png
