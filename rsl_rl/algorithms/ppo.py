@@ -31,6 +31,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
 
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
@@ -52,9 +53,11 @@ class PPO:
                  schedule="fixed",
                  desired_kl=0.01,
                  device='cpu',
+                 dist_ctx=None,
                  ):
 
         self.device = device
+        self.dist_ctx = dist_ctx
 
         self.desired_kl = desired_kl
         self.schedule = schedule
@@ -173,6 +176,7 @@ class PPO:
                 # Gradient step
                 self.optimizer.zero_grad()
                 loss.backward()
+                self._sync_gradients()
                 nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
@@ -185,3 +189,16 @@ class PPO:
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss
+
+    def _sync_gradients(self):
+        ctx = self.dist_ctx
+        if ctx is None or not getattr(ctx, "is_distributed", False):
+            return
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        world_size = ctx.world_size
+        for param in self.actor_critic.parameters():
+            if param.grad is None:
+                continue
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad /= world_size

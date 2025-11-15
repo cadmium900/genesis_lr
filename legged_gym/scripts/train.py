@@ -1,6 +1,20 @@
 import os
 import sys
 
+
+def _configure_cuda_scope():
+    """Limit visible GPUs per process when launched via torchrun."""
+    local_rank = os.environ.get("LOCAL_RANK")
+    world_size = os.environ.get("WORLD_SIZE")
+    if local_rank is None or world_size is None:
+        return
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        return
+    os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
+
+
+_configure_cuda_scope()
+
 os.environ["TI_OFFLINE_CACHE_FILE_PATH"] = os.path.expanduser("cache")
 base_path = os.path.abspath(os.path.join(os.getcwd(), "..", ".."))
 
@@ -15,30 +29,38 @@ from datetime import datetime
 import genesis as gs
 from legged_gym.envs import *
 from legged_gym.utils import get_args, task_registry
+from rsl_rl.utils.distributed import init_distributed, cleanup as dist_cleanup
 import torch
 import shutil
 
 def train(args):
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level='warning')
-    # Make environment and algorithm runner
-    env, env_cfg = task_registry.make_env(name=args.task, args=args)
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
+    dist_ctx = init_distributed(cpu=args.cpu)
+    if dist_ctx.device.type == "cuda":
+        torch.cuda.set_device(dist_ctx.device)
+    try:
+        gs.init(backend=gs.cpu if args.cpu else gs.gpu, logging_level='warning')
+        # Make environment and algorithm runner
+        env, env_cfg = task_registry.make_env(name=args.task, args=args, dist_ctx=dist_ctx)
+        ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, dist_ctx=dist_ctx)
 
-    # Copy env.py and env_config.py to log_dir for backup
-    log_dir = ppo_runner.log_dir
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    if env_cfg.asset.name == args.task:
-        robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task+".py")
-        robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task+"_config.py")
-    else:
-        robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+".py")
-        robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+"_config.py")
-    shutil.copy(robot_file_path, log_dir)
-    shutil.copy(robot_config_path, log_dir)
+        # Copy env.py and env_config.py to log_dir for backup
+        log_dir = ppo_runner.log_dir
+        if dist_ctx.is_main_process and log_dir is not None:
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            if env_cfg.asset.name == args.task:
+                robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task+".py")
+                robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task+"_config.py")
+            else:
+                robot_file_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+".py")
+                robot_config_path = os.path.join(LEGGED_GYM_ROOT_DIR, "legged_gym", "envs", env_cfg.asset.name, args.task, args.task+"_config.py")
+            shutil.copy(robot_file_path, log_dir)
+            shutil.copy(robot_config_path, log_dir)
 
-    # Start training session
-    ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
+        # Start training session
+        ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
+    finally:
+        dist_cleanup()
 
 if __name__ == '__main__':
     args = get_args()

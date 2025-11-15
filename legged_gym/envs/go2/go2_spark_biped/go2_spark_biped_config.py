@@ -4,7 +4,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
     class env:
         episode_length_s = 20 # episode length in seconds
-        num_envs = 11000
+        num_envs = 22000
         env_spacing = 1.0
         num_actions = 12
         # observation history
@@ -158,7 +158,7 @@ class GO2SparkBipedCfg(BaseConfig):
         thigh_angle_sigma = 0.5
         calf_angle_sigma = 0.5
         arm_angle_sigma = 0.5
-        biped_shaping_pitch_window = 0.35
+        biped_shaping_pitch_window = 0.20 #0.35
         biped_shaping_front_weight = 0.6
         biped_shaping_com_weight = 0.4
 
@@ -242,7 +242,7 @@ class GO2SparkBipedCfgPPO():
 
     class algorithm:
         entropy_coef = 0.01
-        num_mini_batches = 4
+        num_mini_batches = 5
         num_learning_epochs = 5
         clip_param = 0.2
         schedule = 'adaptive' # could be adaptive, fixed
@@ -260,8 +260,8 @@ class GO2SparkBipedCfgPPO():
         save_interval = 500
         load_run = "Nov13_23-39-46_spark"
         checkpoint = -1
-        max_iterations = 5000
-        num_steps_per_env = 32
+        max_iterations = 2500
+        num_steps_per_env = 16 #32
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         # load and resume

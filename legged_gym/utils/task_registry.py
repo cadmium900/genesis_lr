@@ -11,6 +11,10 @@ from rsl_rl.utils.runner_registry import runner_registry
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, get_load_path_ee, set_seed
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from rsl_rl.utils.distributed import (
+    DistributedContext,
+    split_num_envs,
+)
 
 class TaskRegistry():
     def __init__(self):
@@ -33,7 +37,7 @@ class TaskRegistry():
         env_cfg.seed = train_cfg.seed
         return env_cfg, train_cfg
 
-    def make_env(self, name, args=None, env_cfg=None) -> Tuple[VecEnv, LeggedRobotCfg]:
+    def make_env(self, name, args=None, env_cfg=None, dist_ctx: DistributedContext = None) -> Tuple[VecEnv, LeggedRobotCfg]:
         """ Creates an environment either from a registered namme or from the provided config file.
 
         Args:
@@ -61,7 +65,16 @@ class TaskRegistry():
             env_cfg, _ = self.get_cfgs(name)
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
-        set_seed(env_cfg.seed)
+        if dist_ctx is not None and getattr(dist_ctx, "is_distributed", False):
+            total_envs = env_cfg.env.num_envs
+            env_cfg.env.global_num_envs = total_envs
+            env_cfg.env.num_envs = split_num_envs(total_envs, dist_ctx)
+            env_cfg.env.rank = dist_ctx.rank
+            env_cfg.env.world_size = dist_ctx.world_size
+            seed = env_cfg.seed + dist_ctx.rank
+        else:
+            seed = env_cfg.seed
+        set_seed(seed)
         # parse sim params (convert to dict first)
         sim_device = "cpu" if args.cpu else "cuda"
         env = task_class(   cfg=env_cfg,
@@ -69,7 +82,7 @@ class TaskRegistry():
                             headless=args.headless)
         return env, env_cfg
 
-    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default") -> Tuple[OnPolicyRunner, LeggedRobotCfgPPO]:
+    def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default", dist_ctx: DistributedContext = None) -> Tuple[OnPolicyRunner, LeggedRobotCfgPPO]:
         """ Creates the training algorithm  either from a registered namme or from the provided config file.
 
         Args:
@@ -112,10 +125,13 @@ class TaskRegistry():
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
 
         train_cfg_dict = class_to_dict(train_cfg)
-        sim_device = "cpu" if args.cpu else "cuda"
+        if dist_ctx is not None:
+            device = dist_ctx.device
+        else:
+            device = torch.device("cpu") if args.cpu else torch.device("cuda")
         # select runner according to runner_class_name
         runner_class = runner_registry.get_runner_class(train_cfg.runner_class_name)
-        runner = runner_class(env, train_cfg_dict, log_dir, device=sim_device)
+        runner = runner_class(env, train_cfg_dict, log_dir, device=device, dist_ctx=dist_ctx)
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:

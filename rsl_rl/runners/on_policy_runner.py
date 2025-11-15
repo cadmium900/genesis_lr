@@ -31,7 +31,6 @@
 import time
 import os
 from collections import deque
-import statistics
 import sys
 
 from datetime import datetime
@@ -43,6 +42,7 @@ from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
 import genesis as gs
 import os, platform
+from rsl_rl.utils import distributed as dist_utils
 
 def is_wsl():
     return platform.system() == "Linux" and "microsoft" in platform.release().lower()
@@ -60,7 +60,8 @@ class OnPolicyRunner:
                  env: VecEnv,
                  train_cfg,
                  log_dir=None,
-                 device='cpu'):
+                 device='cpu',
+                 dist_ctx=None):
 
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
@@ -73,7 +74,12 @@ class OnPolicyRunner:
         #     + "_"
         #     + self.cfg["run_name"]
         # )
-        self.device = device
+        self.dist_ctx = dist_ctx or dist_utils.get_context()
+        self.is_distributed = getattr(self.dist_ctx, "is_distributed", False)
+        self.world_size = getattr(self.dist_ctx, "world_size", 1)
+        self.rank = getattr(self.dist_ctx, "rank", 0)
+        self.is_main_process = self.rank == 0
+        self.device = torch.device(device)
         self.env = env
         if self.env.num_privileged_obs is not None:
             num_critic_obs = self.env.num_privileged_obs
@@ -85,7 +91,7 @@ class OnPolicyRunner:
                                                         self.env.num_actions,
                                                         **self.policy_cfg).to(self.device)
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        self.alg: PPO = alg_class(actor_critic, device=self.device, dist_ctx=self.dist_ctx, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
@@ -95,6 +101,12 @@ class OnPolicyRunner:
         # Log
         self.log_dir = log_dir
         self.writer = None
+        self.should_write_logs = self.log_dir is not None and self.is_main_process
+        self.should_collect_stats = self.should_write_logs or self.is_distributed
+        cfg_obj = getattr(self.env, "cfg", None)
+        cfg_env = getattr(cfg_obj, "env", None) if cfg_obj is not None else None
+        global_envs = getattr(cfg_env, "global_num_envs", None) if cfg_env is not None else None
+        self.global_num_envs = global_envs if global_envs is not None else self.env.num_envs * self.world_size
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
@@ -105,17 +117,21 @@ class OnPolicyRunner:
         self._stdin_settings = None
         if os.name != "nt":
             if sys.stdin.isatty():
-                self._use_linux_keyboard = True
+                self._use_linux_keyboard = self.is_main_process
                 self._stdin_fd = sys.stdin.fileno()
                 self._stdin_settings = termios.tcgetattr(self._stdin_fd)
                 tty.setcbreak(self._stdin_fd)
+            else:
+                self._use_linux_keyboard = False
+        else:
+            self._use_linux_keyboard = self.is_main_process
 
         _, _ = self.env.reset()
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         try:
             # initialize writer
-            if self.log_dir is not None and self.writer is None:
+            if self.should_write_logs and self.writer is None:
                 # wandb.init(
                 #     project="genesis_lr",
                 #     name=self.wandb_run_name,
@@ -161,7 +177,7 @@ class OnPolicyRunner:
                         obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                         self.alg.process_env_step(rewards, dones, infos)
 
-                        if self.log_dir is not None:
+                        if self.should_collect_stats:
                             # Book keeping
                             if 'episode' in infos:
                                 ep_infos.append(infos['episode'])
@@ -183,12 +199,12 @@ class OnPolicyRunner:
                 mean_value_loss, mean_surrogate_loss = self.alg.update()
                 stop = time.time()
                 learn_time = stop - start
-                if self.log_dir is not None:
+                if self.should_collect_stats:
                     self.log(locals())
 
                 rq_quit = False
                 rq_save = False
-                if os.name == "nt" and not is_wsl():
+                if os.name == "nt" and not is_wsl() and self.is_main_process:
                     if msvcrt.kbhit():
                         ch = msvcrt.getwch().lower()
                         if ch == 'q':
@@ -198,7 +214,7 @@ class OnPolicyRunner:
                         elif ch == 's':
                             rq_save = True
                             print("\n[Save Requested]")
-                elif self._use_linux_keyboard:
+                elif self._use_linux_keyboard and self.is_main_process:
                     ch = self._poll_linux_key()
                     if ch == 'q':
                         rq_quit = True
@@ -208,77 +224,105 @@ class OnPolicyRunner:
                         rq_save = True
                         print("\n[Save Requested]")
 
-                if rq_save or rq_quit or (it % self.save_interval == 0):
-                    self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+                if self.is_distributed:
+                    rq_quit = bool(dist_utils.distributed_max(1.0 if rq_quit else 0.0, device=self.device))
+                    rq_save = bool(dist_utils.distributed_max(1.0 if rq_save else 0.0, device=self.device))
+
+                if self.should_write_logs and self.log_dir is not None:
+                    if rq_save or rq_quit or (it % self.save_interval == 0):
+                        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
                 ep_infos.clear()
 
                 if rq_quit:
                     break
 
             self.current_learning_iteration += num_learning_iterations
-            self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+            if self.should_write_logs and self.log_dir is not None:
+                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
         finally:
             self._restore_terminal()
 
     def log(self, locs, width=80, pad=35):
-        self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
-        self.tot_time += locs['collection_time'] + locs['learn_time']
-        iteration_time = locs['collection_time'] + locs['learn_time']
+        collection_time = dist_utils.distributed_max(locs['collection_time'], device=self.device)
+        learn_time = dist_utils.distributed_max(locs['learn_time'], device=self.device)
+        iteration_time = collection_time + learn_time
+        mean_value_loss = dist_utils.distributed_mean(locs['mean_value_loss'], device=self.device)
+        mean_surrogate_loss = dist_utils.distributed_mean(locs['mean_surrogate_loss'], device=self.device)
+
+        self.tot_timesteps += self.num_steps_per_env * self.global_num_envs
+        self.tot_time += iteration_time
 
         ep_string = f''
         if locs['ep_infos']:
             for key in locs['ep_infos'][0]:
-                infotensor = torch.tensor([], device=self.device)
+                values = []
                 for ep_info in locs['ep_infos']:
-                    # handle scalar and zero dimensional tensor infos
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                self.writer.add_scalar('Episode/' + key, value, locs['it'])
-                ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.6f}\n"""
+                    value = ep_info[key]
+                    if not isinstance(value, torch.Tensor):
+                        value = torch.tensor([value], device=self.device)
+                    if len(value.shape) == 0:
+                        value = value.unsqueeze(0)
+                    values.append(value.to(self.device))
+                if not values:
+                    continue
+                stacked = torch.cat(values)
+                value_sum = stacked.sum()
+                value_count = stacked.numel()
+                value_sum = dist_utils.distributed_sum(value_sum, device=self.device)
+                value_count = dist_utils.distributed_sum(value_count, device=self.device)
+                if value_count > 0:
+                    mean_val = value_sum / value_count
+                    if self.writer is not None:
+                        self.writer.add_scalar('Episode/' + key, mean_val, locs['it'])
+                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {mean_val:.6f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
-        fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
+        mean_std_value = dist_utils.distributed_mean(mean_std.item(), device=self.device)
+        total_frames = self.num_steps_per_env * self.global_num_envs
+        fps = int(total_frames / iteration_time) if iteration_time > 0 else 0
 
-        self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
-        self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
-        self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
-        self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
-        self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
-        self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
-        self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])
-        if len(locs['rewbuffer']) > 0:
-            self.writer.add_scalar('Train/mean_reward', statistics.mean(locs['rewbuffer']), locs['it'])
-            self.writer.add_scalar('Train/mean_episode_length', statistics.mean(locs['lenbuffer']), locs['it'])
-            self.writer.add_scalar('Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
-            self.writer.add_scalar('Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
+        if self.writer is not None:
+            self.writer.add_scalar('Loss/value_function', mean_value_loss, locs['it'])
+            self.writer.add_scalar('Loss/surrogate', mean_surrogate_loss, locs['it'])
+            self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
+            self.writer.add_scalar('Policy/mean_noise_std', mean_std_value, locs['it'])
+            self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
+            self.writer.add_scalar('Perf/collection time', collection_time, locs['it'])
+            self.writer.add_scalar('Perf/learning_time', learn_time, locs['it'])
 
-        str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+        rewbuffer = list(locs['rewbuffer'])
+        lenbuffer = list(locs['lenbuffer'])
+        rew_sum_local = float(sum(rewbuffer)) if rewbuffer else 0.0
+        rew_count_local = float(len(rewbuffer))
+        len_sum_local = float(sum(lenbuffer)) if lenbuffer else 0.0
+        len_count_local = float(len(lenbuffer))
 
-        if len(locs['rewbuffer']) > 0:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                          f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                          f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
-        else:
-            log_string = (f"""{'#' * width}\n"""
-                          f"""{str.center(width, ' ')}\n\n"""
-                          f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs[
-                            'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
-                          f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
-                          f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
-                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
-                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
+        rew_sum = dist_utils.distributed_sum(rew_sum_local, device=self.device)
+        rew_count = dist_utils.distributed_sum(rew_count_local, device=self.device)
+        len_sum = dist_utils.distributed_sum(len_sum_local, device=self.device)
+        len_count = dist_utils.distributed_sum(len_count_local, device=self.device)
+
+        mean_reward = rew_sum / rew_count if rew_count > 0 else None
+        mean_episode_length = len_sum / len_count if len_count > 0 else None
+
+        if self.writer is not None and mean_reward is not None:
+            self.writer.add_scalar('Train/mean_reward', mean_reward, locs['it'])
+            self.writer.add_scalar('Train/mean_reward/time', mean_reward, self.tot_time)
+        if self.writer is not None and mean_episode_length is not None:
+            self.writer.add_scalar('Train/mean_episode_length', mean_episode_length, locs['it'])
+            self.writer.add_scalar('Train/mean_episode_length/time', mean_episode_length, self.tot_time)
+
+        header = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
+
+        log_string = (f"""{'#' * width}\n"""
+                      f"""{header.center(width, ' ')}\n\n"""
+                      f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {collection_time:.3f}s, learning {learn_time:.3f}s)\n"""
+                      f"""{'Value function loss:':>{pad}} {mean_value_loss:.4f}\n"""
+                      f"""{'Surrogate loss:':>{pad}} {mean_surrogate_loss:.4f}\n"""
+                      f"""{'Mean action noise std:':>{pad}} {mean_std_value:.2f}\n""")
+        if mean_reward is not None:
+            log_string += f"""{'Mean reward:':>{pad}} {mean_reward:.2f}\n"""
+        if mean_episode_length is not None:
+            log_string += f"""{'Mean episode length:':>{pad}} {mean_episode_length:.2f}\n"""
 
         log_string += ep_string
         eta_sec = self.tot_time / (locs['it'] + 1) * (locs['num_learning_iterations'] - locs['it'])
@@ -290,7 +334,8 @@ class OnPolicyRunner:
                        f"""{'ETA:':>{pad}} {eta_sec:.1f}s {eta_hour:.1f}h\n"""
                        )
 
-        print(log_string)
+        if self.is_main_process:
+            print(log_string)
 
     def _poll_linux_key(self):
         if not self._use_linux_keyboard:
@@ -307,15 +352,23 @@ class OnPolicyRunner:
             self._use_linux_keyboard = False
 
     def save(self, path, infos=None):
+        if not self.is_main_process or path is None:
+            return path
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
             }, path)
+        return path
 
     def load(self, path, load_optimizer=True):
-        loaded_dict = torch.load(path)
+        if path is None:
+            return None
+        map_location = self.device
+        loaded_dict = torch.load(path, map_location=map_location) if self.is_main_process else None
+        if self.is_distributed:
+            loaded_dict = dist_utils.broadcast_object(loaded_dict, src=0)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
