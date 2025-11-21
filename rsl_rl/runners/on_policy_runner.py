@@ -32,6 +32,8 @@ import time
 import os
 from collections import deque
 import sys
+import numpy as np
+import atexit
 
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
@@ -81,6 +83,10 @@ class OnPolicyRunner:
         self.is_main_process = self.rank == 0
         self.device = torch.device(device)
         self.env = env
+        self._camera = None
+        self._camera_recording = False
+        self._last_camera_frame_time = 0.0
+        self._last_camera_target = None
         if self.env.num_privileged_obs is not None:
             num_critic_obs = self.env.num_privileged_obs
         else:
@@ -115,12 +121,17 @@ class OnPolicyRunner:
         self._use_linux_keyboard = False
         self._stdin_fd = None
         self._stdin_settings = None
+        self._terminal_restore_registered = False
         if os.name != "nt":
             if sys.stdin.isatty():
                 self._use_linux_keyboard = self.is_main_process
-                self._stdin_fd = sys.stdin.fileno()
-                self._stdin_settings = termios.tcgetattr(self._stdin_fd)
-                tty.setcbreak(self._stdin_fd)
+                if self._use_linux_keyboard:
+                    self._stdin_fd = sys.stdin.fileno()
+                    self._stdin_settings = termios.tcgetattr(self._stdin_fd)
+                    tty.setcbreak(self._stdin_fd)
+                    if not self._terminal_restore_registered:
+                        atexit.register(self._restore_terminal)
+                        self._terminal_restore_registered = True
             else:
                 self._use_linux_keyboard = False
         else:
@@ -176,6 +187,7 @@ class OnPolicyRunner:
                         critic_obs = privileged_obs if privileged_obs is not None else obs
                         obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                         self.alg.process_env_step(rewards, dones, infos)
+                        self._maybe_render_camera_frame()
 
                         if self.should_collect_stats:
                             # Book keeping
@@ -204,29 +216,76 @@ class OnPolicyRunner:
 
                 rq_quit = False
                 rq_save = False
+                rq_record_start = False
+                rq_record_stop = False
                 if os.name == "nt" and not is_wsl() and self.is_main_process:
                     if msvcrt.kbhit():
                         ch = msvcrt.getwch().lower()
                         if ch == 'q':
                             rq_quit = True
                             print("\n[Quit Requested]")
-                            break
+                            self._restore_terminal()
                         elif ch == 's':
                             rq_save = True
                             print("\n[Save Requested]")
+                        elif ch == 'b':
+                            camera = self._resolve_camera()
+                            if camera is not None:
+                                if self._camera_recording:
+                                    print("\n[Already Recording]")
+                                else:
+                                    print("\n[Start Recording Requested]")
+                                    rq_record_start = True
+                            else:
+                                print("\n[No Floating Camera to Record From]")
+                        elif ch == 'e':
+                            camera = self._resolve_camera()
+                            if camera is None:
+                                print("\n[No Floating Camera to Record From]")
+                            elif not self._camera_recording:
+                                print("\n[No Active Recording to Stop]")
+                            else:
+                                print("\n[Stop Recording Requested]")
+                                rq_record_stop = True
                 elif self._use_linux_keyboard and self.is_main_process:
                     ch = self._poll_linux_key()
                     if ch == 'q':
                         rq_quit = True
                         print("\n[Quit Requested]")
-                        break
+                        self._restore_terminal()
                     elif ch == 's':
                         rq_save = True
                         print("\n[Save Requested]")
+                    elif ch == 'b':
+                        camera = self._resolve_camera()
+                        if camera is not None:
+                            if self._camera_recording:
+                                print("\n[Already Recording]")
+                            else:
+                                print("\n[Start Recording Requested]")
+                                rq_record_start = True
+                        else:
+                            print("\n[No Floating Camera to Record From]")
+                    elif ch == 'e':
+                        camera = self._resolve_camera()
+                        if camera is None:
+                            print("\n[No Floating Camera to Record From]")
+                        elif not self._camera_recording:
+                            print("\n[No Active Recording to Stop]")
+                        else:
+                            print("\n[Stop Recording Requested]")
+                            rq_record_stop = True
 
                 if self.is_distributed:
                     rq_quit = bool(dist_utils.distributed_max(1.0 if rq_quit else 0.0, device=self.device))
                     rq_save = bool(dist_utils.distributed_max(1.0 if rq_save else 0.0, device=self.device))
+                    rq_record_start = bool(dist_utils.distributed_max(1.0 if rq_record_start else 0.0, device=self.device))
+                    rq_record_stop = bool(dist_utils.distributed_max(1.0 if rq_record_stop else 0.0, device=self.device))
+
+                if rq_record_start:
+                    self._sync_camera_recording(action="start")
+                if rq_record_stop:
+                    self._sync_camera_recording(action="stop")
 
                 if self.should_write_logs and self.log_dir is not None:
                     if rq_save or rq_quit or (it % self.save_interval == 0):
@@ -234,15 +293,120 @@ class OnPolicyRunner:
                 ep_infos.clear()
 
                 if rq_quit:
+                    self._restore_terminal()
                     break
-
             self.current_learning_iteration += num_learning_iterations
+
             if self.should_write_logs and self.log_dir is not None:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
         finally:
+            dist_utils.barrier()
             self._restore_terminal()
 
-    def log(self, locs, width=80, pad=35):
+    def _maybe_render_camera_frame(self):
+        """Render camera frames at a capped FPS when recording is active."""
+        if not (self._camera_recording and self.is_main_process):
+            return
+        camera = self._resolve_camera()
+        if camera is None:
+            return
+        self._update_camera_pose(camera)
+        target_fps = self.cfg.get("recording_capture_fps", self.cfg.get("recording_fps", 10))
+        try:
+            target_fps = max(1, int(target_fps))
+        except (TypeError, ValueError):
+            target_fps = 10
+        min_interval = 1.0 / target_fps
+        now = time.time()
+        if self._last_camera_frame_time and (now - self._last_camera_frame_time) < min_interval:
+            return
+        try:
+            camera.render()
+        except Exception as exc:
+            print(f"[Camera] Failed to render frame: {exc}")
+            self._camera_recording = False
+            return
+        self._last_camera_frame_time = now
+
+    def _resolve_camera(self):
+        """Cache and return the floating camera if present."""
+        if self._camera is not None:
+            return self._camera
+        camera = getattr(self.env, "floating_camera", None)
+        if camera is None and hasattr(self.env, "get_camera"):
+            camera = self.env.get_camera()
+        if camera is not None:
+            self._camera = camera
+        return camera
+
+    def _update_camera_pose(self, camera, force=False):
+        """Align camera pose with the configured reference environment's origin."""
+        if camera is None:
+            return
+        env_cfg = getattr(self.env, "cfg", None)
+        viewer_cfg = getattr(env_cfg, "viewer", None) if env_cfg is not None else None
+        env_origins = getattr(self.env, "env_origins", None)
+        base_positions = getattr(self.env, "base_pos", None)
+        if viewer_cfg is None:
+            return
+        origin_candidate = None
+        try:
+            ref_env = int(getattr(viewer_cfg, "ref_env", 0))
+        except (TypeError, ValueError):
+            ref_env = 0
+        if isinstance(base_positions, torch.Tensor) and base_positions.shape[0] > 0:
+            ref_env = max(0, min(ref_env, base_positions.shape[0] - 1))
+            origin_candidate = base_positions[ref_env].detach().cpu().numpy()
+        elif isinstance(env_origins, torch.Tensor) and env_origins.numel() > 0:
+            ref_env = max(0, min(ref_env, env_origins.shape[0] - 1))
+            origin_candidate = env_origins[ref_env].detach().cpu().numpy()
+        if origin_candidate is None:
+            return
+        if not force and self._last_camera_target is not None and np.allclose(origin_candidate, self._last_camera_target):
+            return
+        pos_offset = np.array(getattr(viewer_cfg, "pos", [3.0, 3.0, 3.0]), dtype=np.float32)
+        lookat_offset = np.array(getattr(viewer_cfg, "lookat", [0.0, 0.0, 1.0]), dtype=np.float32)
+        camera_pos = pos_offset + origin_candidate
+        camera_lookat = origin_candidate #lookat_offset + origin_candidate
+        if hasattr(self.env, "set_camera"):
+            self.env.set_camera(pos=camera_pos, lookat=camera_lookat)
+        else:
+            camera.set_pose(pos=camera_pos, lookat=camera_lookat)
+        self._last_camera_target = origin_candidate
+
+    def _sync_camera_recording(self, action: str):
+        """Pause all ranks while interacting with the floating camera."""
+        if action not in ("start", "stop"):
+            raise ValueError(f"Unsupported camera action '{action}'")
+
+        dist_utils.barrier()
+        camera = None
+        success = 0.0
+        if self.is_main_process:
+            camera = self._resolve_camera()
+            if camera is not None:
+                try:
+                    if action == "start":
+                        self._update_camera_pose(camera, force=True)
+                        camera.start_recording()
+                        camera.render()
+                    else:
+                        save_dir = self.log_dir if self.log_dir is not None else os.getcwd()
+                        filename = os.path.join(save_dir, f"{int(time.time())}.mp4")
+                        fps = self.cfg.get("recording_fps", 10)
+                        camera.stop_recording(save_to_filename=filename, fps=fps)
+                    success = 1.0
+                except Exception as exc:
+                    print(f"[Camera] Failed to {action} recording: {exc}")
+        dist_utils.barrier()
+        success = bool(dist_utils.distributed_max(success, device=self.device))
+        if action == "start" and success:
+            self._camera_recording = True
+            self._last_camera_frame_time = 0.0
+        elif action == "stop":
+            self._camera_recording = False
+
+    def log(self, locs, width=80, pad=50):
         collection_time = dist_utils.distributed_max(locs['collection_time'], device=self.device)
         learn_time = dist_utils.distributed_max(locs['learn_time'], device=self.device)
         iteration_time = collection_time + learn_time
@@ -347,9 +511,14 @@ class OnPolicyRunner:
         return None
 
     def _restore_terminal(self):
-        if self._use_linux_keyboard and self._stdin_fd is not None and self._stdin_settings is not None:
+        if self._stdin_fd is None or self._stdin_settings is None:
+            return
+        try:
             termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, self._stdin_settings)
-            self._use_linux_keyboard = False
+            termios.tcflush(self._stdin_fd, termios.TCIOFLUSH)
+        except termios.error:
+            pass
+        self._use_linux_keyboard = False
 
     def save(self, path, infos=None):
         if not self.is_main_process or path is None:

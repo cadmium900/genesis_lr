@@ -19,9 +19,9 @@ class GO2SparkBipedCfg(BaseConfig):
         debug_viz = False
 
     class terrain:
-        mesh_type = 'plane' # "heightfield" # none, plane, heightfield
+        mesh_type = 'heightfield' # "heightfield" # none, plane, heightfield
         plane_length = 200.0 # [m]. plane size is 200x200x10 by default
-        horizontal_scale = 0.1 # [m]
+        horizontal_scale = 0.22 # [m] reduce vertex count for terrain mesh SDF
         vertical_scale = 0.005 # [m]
         border_size = 5 # [m]
         curriculum = True
@@ -46,26 +46,24 @@ class GO2SparkBipedCfg(BaseConfig):
     class commands:
         curriculum = True
         heading_command = True  # if true: compute ang vel command from heading error
-        resampling_time = 3.  # time before command are changed[s]
+        resampling_time = 3.0  # time before command are changed[s]
         max_curriculum = 1.
         # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         num_commands = 4
         curriculum_front_feet_thrs = 0.8
         curriculum_orientation_thrs = 0.8
-        curriculum_threshold = 0.8
+        curriculum_threshold = 0.6
         min_normal = 0.05
-        foot_step_distance = 0.20
         class ranges:
-            lin_vel_x = [0.0, 0.4]
-            lin_vel_y = [-0.1, 0.1]
-            ang_vel_yaw = [-0.2, 0.2]
+            lin_vel_x = [-1.0, 1.0]
+            lin_vel_y = [-0.01, 0.01] # Was -0.2, 0.2
+            ang_vel_yaw = [-0.5, 0.5]
             heading = [-3.14, 3.14]
 
     class init_state:
-        #pos = [0.0, 0.0, 0.62]  # x,y,z [m]
-        #rot = [1.0, 0.0, -0.8, 0.0] # w, x, y, z [quat]
         pos = [0.0, 0.0, 0.42]  # x,y,z [m]
         rot = [1.0, 0.0, 0.0, 0.0] # w, x, y, z [quat]
+
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
         yaw_angle_range = [0., 3.14]  # min max [rad]
@@ -158,7 +156,7 @@ class GO2SparkBipedCfg(BaseConfig):
         thigh_angle_sigma = 0.5
         calf_angle_sigma = 0.5
         arm_angle_sigma = 0.5
-        biped_shaping_pitch_window = 0.20 #0.35
+        biped_shaping_pitch_window = 0.90
         biped_shaping_front_weight = 0.6
         biped_shaping_com_weight = 0.4
 
@@ -167,15 +165,13 @@ class GO2SparkBipedCfg(BaseConfig):
             front_feet_off = 0.8
             front_feet_on_ground_push = 0.0025
             hind_alternation = 0.9
-            com_over_support = 0.75
+            com_over_support = 0.9
             tracking_lin_vel = 1.5
             tracking_ang_vel = 0.8
             orientation = 1.0
-            base_height_target = 0.8
-            hind_foot_clearance = 0.5
-            #front_arm_angle = 0.17
+            base_height_target = 0.5
+            hind_foot_clearance = 0.8
             arm_angles = 0.5
-           # foot_step = 1.1
 
             dof_pos_limits = -10.0
             collision = -1.0
@@ -190,8 +186,8 @@ class GO2SparkBipedCfg(BaseConfig):
         class behavior_params_range:
             resampling_time = 6.0
             gait_period_range = [0.40, 0.60]
-            foot_clearance_target_range = [0.06, 0.19]
-            base_height_target_range = [0.50, 0.65]
+            foot_clearance_target_range = [0.26, 0.29]
+            base_height_target_range = [0.60, 0.65]
             pitch_target_range = [1.0, 1.0]
 
     class normalization:
@@ -221,7 +217,7 @@ class GO2SparkBipedCfg(BaseConfig):
         pos = [2, 2, 2]       # [m]
         lookat = [0., 0, 1.]  # [m]
         rendered_envs_idx = [i for i in range(15)]  # number of environments to be rendered
-        add_camera = False
+        add_camera = True
 
     class sim:
         gravity = [0., 0. ,-9.81]  # [m/s^2]
@@ -258,14 +254,12 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Nov13_23-39-46_spark"
+        load_run = "Nov19_13-58-45_spark"
         checkpoint = -1
-        max_iterations = 2500
+        max_iterations = 3000
         num_steps_per_env = 16 #32
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         # load and resume
         resume = False
         resume_path = None # updated from load_run and chkpt
-
-

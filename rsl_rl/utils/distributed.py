@@ -88,8 +88,17 @@ def cleanup():
 
 def barrier():
     ctx = get_context()
-    if ctx.is_distributed and dist.is_available() and dist.is_initialized():
-        dist.barrier()
+    if not (ctx.is_distributed and dist.is_available() and dist.is_initialized()):
+        return
+    if ctx.device.type == "cuda":
+        device_index = ctx.device.index
+        if device_index is None and torch.cuda.is_available():
+            device_index = torch.cuda.current_device()
+        if device_index is not None:
+            # Explicitly pass device ids to avoid NCCL warnings about implicit context usage.
+            dist.barrier(device_ids=[device_index])
+            return
+    dist.barrier()
 
 
 def split_num_envs(total_envs: int, ctx: DistributedContext) -> int:

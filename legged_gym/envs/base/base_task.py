@@ -38,8 +38,34 @@ class BaseTask():
             self.privileged_obs_buf = None
 
         self.extras = {}
+        self.floating_camera = None
 
         self.create_sim()
+
+    def set_camera(self, pos, lookat):
+        """ Set camera position and direction
+        """
+        self.floating_camera.set_pose(
+            pos=pos,
+            lookat=lookat
+        )
+
+    def get_camera(self):
+        return self.floating_camera
+
+    # ------------- Callbacks --------------
+    def _setup_camera(self):
+        ''' Set camera position and direction
+        '''
+        self.floating_camera = self.scene.add_camera(
+            res= (1280, 960),
+            pos=np.array(self.cfg.viewer.pos),
+            lookat=np.array(self.cfg.viewer.lookat),
+            fov=30,
+            GUI=True,
+        )
+        if self.floating_camera is None:
+            print("Failed to create floating_camera")
 
     def get_observations(self):
         return self.obs_buf

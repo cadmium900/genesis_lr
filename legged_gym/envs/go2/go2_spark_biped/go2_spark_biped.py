@@ -19,16 +19,18 @@ from warnings import WarningMessage
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.envs.base.legged_robot import LeggedRobot
-from legged_gym.utils.math_utils import wrap_to_pi
+from legged_gym.utils.math_utils import wrap_to_pi, torch_rand_sqrt_float, quat_apply_yaw
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.gs_utils import *
+from legged_gym.utils.terrain import Terrain
 from .go2_spark_biped_config import GO2SparkBipedCfg
-
 
 class GO2SparkBiped(BaseTask):
     def __init__(self, cfg: GO2SparkBipedCfg, sim_device, headless):
         start = time.time()
         self.cfg = cfg
+        self.last_record_time = time.time()
+        self.video_capturing = False
         self.height_samples = None
         self.debug_viz = self.cfg.env.debug_viz
         self.init_done = False
@@ -58,7 +60,7 @@ class GO2SparkBiped(BaseTask):
             rigid_options=gs.options.RigidOptions(
                 dt=self.sim_dt,
                 constraint_solver=gs.constraint_solver.Newton,
-                #constraint_timeconst=0.01,
+                constraint_timeconst=0.01,
                 enable_collision=True,
                 enable_joint_limit=True,
                 enable_self_collision=self.cfg.asset.self_collisions,
@@ -123,29 +125,6 @@ class GO2SparkBiped(BaseTask):
             vis_mode="collision"
         )
         self.height_samples = torch.tensor(self.utils_terrain.heightsamples).view(self.utils_terrain.tot_rows, self.utils_terrain.tot_cols).to(self.device)
-
-    def set_camera(self, pos, lookat):
-        """ Set camera position and direction
-        """
-        self.floating_camera.set_pose(
-            pos=pos,
-            lookat=lookat
-        )
-
-    # ------------- Callbacks --------------
-    def _setup_camera(self):
-        ''' Set camera position and direction
-        '''
-        self.floating_camera = self.scene.add_camera(
-            res= (1280, 960),
-            pos=np.array(self.cfg.viewer.pos),
-            lookat=np.array(self.cfg.viewer.lookat),
-            fov=60,
-            GUI=True,
-        )
-
-        self._recording = False
-        self._recorded_frames = []
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -424,15 +403,14 @@ class GO2SparkBiped(BaseTask):
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         self.reset_buf |= self.time_out_buf
 
-        proj_grav_over_limit = self.base_axis_fwd[:, 2] < self.termination_z # 0.6
+        proj_grav_over_limit = self.base_axis_fwd[:, 2] < self.termination_z
         self.reset_buf |= proj_grav_over_limit
 
-        # pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
-        # pitch_reset = torch.logical_and(
-        #     pitch_error < 0.3,
-        #     self.episode_length_buf > self.max_episode_length * 0.1,
-        # )
-        # self.reset_buf |= pitch_reset
+        # After a while if robot not standing enough upright, reset
+        # elapsed_limit = self.episode_length_buf > self.max_episode_length * 0.25
+        # upright_fail = torch.logical_and(elapsed_limit, self.base_axis_fwd[:, 2] < 0.5)
+        # self.reset_buf |= upright_fail
+
 
 
     def compute_reward(self):
@@ -934,6 +912,28 @@ class GO2SparkBiped(BaseTask):
 
         return heights.view(self.num_envs, -1) * self.cfg.terrain.vertical_scale
 
+    def _terrain_height_at_points(self, points_xy: torch.Tensor) -> torch.Tensor:
+        """Return terrain height right under the queried XY points (shape: [N, K, 2]).
+        Falls back to zeros on non-heightfield terrain."""
+        if self.height_samples is None or self.height_samples.numel() == 0:
+            return torch.zeros(points_xy.shape[:-1], device=self.device, dtype=gs.tc_float)
+
+        px = ((points_xy[..., 0] + self.cfg.terrain.border_size) / self.cfg.terrain.horizontal_scale).long()
+        py = ((points_xy[..., 1] + self.cfg.terrain.border_size) / self.cfg.terrain.horizontal_scale).long()
+
+        px = torch.clip(px, 0, self.height_samples.shape[0] - 2)
+        py = torch.clip(py, 0, self.height_samples.shape[1] - 2)
+
+        flat_px = px.view(-1)
+        flat_py = py.view(-1)
+
+        h1 = self.height_samples[flat_px, flat_py]
+        h2 = self.height_samples[flat_px + 1, flat_py]
+        h3 = self.height_samples[flat_px, flat_py + 1]
+        h = torch.min(torch.min(h1, h2), h3)
+
+        return h.view(*points_xy.shape[:-1]) * self.cfg.terrain.vertical_scale
+
     def _get_noise_scale_vec(self):
         """ Sets a vector used to scale the noise added to the observations.
             [NOTE]: Must be adapted when changing the observations structure
@@ -1212,6 +1212,11 @@ class GO2SparkBiped(BaseTask):
                 self.foot_index_rl = self.feet_indices[i]
             elif "RR" in self.feet_names[i]:
                 self.foot_index_rr = self.feet_indices[i]
+        self.front_foot_indices = torch.tensor(
+            [self.foot_index_fl, self.foot_index_fr],
+            device=self.device,
+            dtype=torch.long,
+        )
         print(f"[create_envs:randomize] Latency {time.time() - start}")
 
     def _get_env_origins(self):
@@ -1352,25 +1357,17 @@ class GO2SparkBiped(BaseTask):
         n_inf_loc   = torch.isinf(loc).sum().item()
         return (n_nan_loc, n_inf_loc)
 
-    # def _reward_thigh_angle(self):
-    #     # Rear thighs
-    #     thighs_joint_indices = [7, 10]
-    #     angle_req = 90.0 * torch.pi / 180.0
-    #     thighs_dof_pos = torch.tensor([angle_req, angle_req],  device=self.device, dtype=gs.tc_float)
-    #     dof_pos_error = torch.sum(torch.square(self.dof_pos[:, thighs_joint_indices] - thighs_dof_pos), dim=-1)
-    #     return torch.exp(-dof_pos_error / self.cfg.rewards.thigh_angle_sigma)
-
-    # def _reward_calf_angle(self):
-    #     calfs_joint_indices = [8, 11]
-    #     angle_req = 10.0 * torch.pi / 180.0
-
-    #     calfs_dof_pos = torch.tensor([angle_req, angle_req],  device=self.device, dtype=gs.tc_float)
-    #     dof_pos_error = torch.sum(torch.abs(self.dof_pos[:, calfs_joint_indices] - calfs_dof_pos), dim=-1)
-    #     return torch.exp(-dof_pos_error / self.cfg.rewards.calf_angle_sigma)
-
     def _angle_diff(self, a, b):
         # wrap to (-pi, pi]
         return torch.atan2(torch.sin(a - b), torch.cos(a - b))
+
+    def _biped_orientation_gate(self):
+        # Gate shaping rewards: 1 when aligned, 0 when far from target
+        target = self.fixed_pitch_target.squeeze(1)
+        error = torch.abs(self.base_axis_fwd[:, 2] - target)
+        window = max(self.cfg.rewards.biped_shaping_pitch_window, 1e-6)
+        gate = torch.clamp(error / window, 0.0, 1.0)
+        return 1.0 - gate
 
     def _reward_arm_angles(self):
         # ---- gather & validate shapes ----
@@ -1406,25 +1403,21 @@ class GO2SparkBiped(BaseTask):
         # k = self.cfg.rewards.arm_angle_k
         # reward = 1.0 / (1.0 + k * err)
 
-        return reward
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_orientation(self):
         pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
         tracking_reward = torch.exp(-pitch_error / self.cfg.rewards.euler_tracking_sigma)
         return tracking_reward
 
-    def _biped_orientation_gate(self):
-        # Gate shaping rewards: 1 when orientation far from target, 0 once aligned
-        target = self.fixed_pitch_target.squeeze(1)
-        error = torch.abs(self.base_axis_fwd[:, 2] - target)
-        window = max(self.cfg.rewards.biped_shaping_pitch_window, 1e-6)
-        return torch.clamp(error / window, 0.0, 1.0)
-
     def _reward_base_height_target(self):
         # Modulate base_height_target by pitch_error. Less errors == more toward base_height_target, less, move toward 0.5 * base_target
         base_height = torch.mean(self.base_pos[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
         rew = torch.square(base_height - self.base_height_target.squeeze(1))
-        return torch.exp(-rew / self.cfg.rewards.base_height_tracking_sigma)
+        reward = torch.exp(-rew / self.cfg.rewards.base_height_tracking_sigma)
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_tracking_ang_vel(self):
         up = self.base_axis_fwd                           # biped up in world
@@ -1434,8 +1427,11 @@ class GO2SparkBiped(BaseTask):
 
         cmd_yaw = self.commands[:, 2]
         err = (cmd_yaw - yaw_rate)**2
-        posture = torch.exp(-((self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))**2) / 0.1)
-        return torch.exp(-err / self.cfg.rewards.tracking_sigma) * posture
+
+        reward = torch.exp(-err / self.cfg.rewards.tracking_sigma)
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
+
 
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
@@ -1444,7 +1440,10 @@ class GO2SparkBiped(BaseTask):
         frame_lin_vel[:, 0] = -self.base_lin_vel[:, 2]
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - frame_lin_vel[:, :2]), dim=1)
 
-        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
+        reward = torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
+
 
     def _contact_mag(self, idx):  # smooth contact metric
         return torch.norm(self.link_contact_forces[:, idx, :], dim=-1)
@@ -1454,8 +1453,7 @@ class GO2SparkBiped(BaseTask):
         f_fr = self._contact_mag(self.foot_index_fr)
         x = f_fl + f_fr
         reward = torch.exp(-(x * x) / 500.0)
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.ones_like(reward), reward, gate)
+        return reward
 
     def _reward_front_feet_on_ground_push(self):
         # Get contact forces for the front left and front right feet
@@ -1479,10 +1477,8 @@ class GO2SparkBiped(BaseTask):
         contact_fr = self._contact_mag(self.foot_index_fr) > 1.0
         contact = contact_fl | contact_fr  # Either foot in contact
 
-        rew = torch.where(contact.float() > 0.0, push_reward * contact.float(), 1.0)
-
-        # Apply reward only when in contact
-        return rew
+        reward = torch.where(contact.float() > 0.0, push_reward * contact.float(), 1.0)
+        return reward
 
     def _reward_hind_alternation(self):
         # encourage alternating single support (one foot on, other off)
@@ -1509,20 +1505,25 @@ class GO2SparkBiped(BaseTask):
         )
         rew_standing = 1.0*both - 0.8*none - 0.8*single
         rew_moving = 1.0*single - 0.3*both - 0.8*none
-        rew = torch.where(moving, rew_moving, rew_standing)
-
-        return rew
+        reward = torch.where(moving, rew_moving, rew_standing)
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_hind_foot_clearance(self):
-        foot_vel_xy_norm = torch.norm(self.feet_vel[:, 2:, :2], dim=-1)
-        clearance_error = torch.sum(
-            foot_vel_xy_norm * torch.square(
-                self.feet_pos[:, 2:, 2] -
-                self.foot_clearance_target -
-                self.cfg.rewards.foot_height_offset
-            ), dim=-1
-        )
-        return torch.exp(-clearance_error / self.cfg.rewards.foot_clearance_tracking_sigma)
+        # Use terrain-relative height on rough terrain and only penalize during swing.
+        hind_pos = self.feet_pos[:, 2:, :]                       # [N, 2, 3] (RL, RR)
+        hind_height = hind_pos[:, :, 2] - self._terrain_height_at_points(hind_pos[:, :, :2])
+
+        hind_contacts = self.link_contact_forces[:, self.feet_indices[2:], 2] > 1.0
+        swing_mask = (~hind_contacts).float()
+
+        target = self.foot_clearance_target + self.cfg.rewards.foot_height_offset
+        below_target = torch.clamp(target - hind_height, min=0.0)
+
+        clearance_error = torch.sum(swing_mask * below_target ** 2, dim=-1)
+        reward = torch.exp(-clearance_error / self.cfg.rewards.foot_clearance_tracking_sigma)
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_com_over_support(self):
         p_rl = self.feet_pos[:, 2, :2]
@@ -1533,4 +1534,4 @@ class GO2SparkBiped(BaseTask):
         d = torch.norm(com - p_mid, dim=-1)
         reward = torch.exp(-(d * d) / 0.03)      # sigma ≈ 0.173 m
         gate = self._biped_orientation_gate()
-        return torch.lerp(torch.ones_like(reward), reward, gate)
+        return torch.lerp(torch.zeros_like(reward), reward, gate)

@@ -701,6 +701,30 @@ class LeggedRobot(BaseTask):
         self.robot.set_dofs_kp(self.p_gains, self.motors_dof_idx)
         self.robot.set_dofs_kv(self.d_gains, self.motors_dof_idx)
 
+    def _override_joint_reference_pose(self):
+        """Override URDF joint references so builds start within joint limits."""
+        defaults = getattr(self.cfg.init_state, "default_joint_angles", None)
+        if not defaults:
+            return
+        joints = getattr(self.robot, "joints", None)
+        if not joints:
+            return
+        for joint in joints:
+            target = defaults.get(joint.name)
+            if target is None or getattr(joint, "n_qs", 0) != 1:
+                continue
+            target_val = float(target)
+            limits = getattr(joint, "dofs_limit", None)
+            if limits is not None and limits.shape[0] > 0:
+                lower, upper = limits[0]
+                if np.isfinite(lower):
+                    target_val = max(target_val, lower)
+                if np.isfinite(upper):
+                    target_val = min(target_val, upper)
+            init_qpos = np.array(joint.init_qpos(), copy=True, dtype=np.float64)
+            init_qpos[...] = target_val
+            joint._init_qpos = init_qpos
+
     def _prepare_reward_function(self):
         """ Prepares a list of reward functions, whcih will be called to compute the total reward.
             Looks for self._reward_<REWARD_NAME>, where <REWARD_NAME> are names of all non zero reward scales in the cfg.
@@ -763,6 +787,7 @@ class LeggedRobot(BaseTask):
             ),
             visualize_contact=self.debug,
         )
+        self._override_joint_reference_pose()
 
         # build
         self.scene.build(n_envs=self.num_envs)

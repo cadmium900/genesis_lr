@@ -54,10 +54,13 @@ def play(args):
     # initial state randomization
     env_cfg.init_state.yaw_angle_range = [0., 0.]
     # velocity range
-    env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
-    env_cfg.commands.ranges.lin_vel_y = [-1., 1.]
-    env_cfg.commands.ranges.ang_vel_yaw = [0., 0.]
-    env_cfg.commands.ranges.heading = [0, 0]
+    # env_cfg.commands.ranges.lin_vel_x = [-1.0, 1.0]
+    # env_cfg.commands.ranges.lin_vel_y = [-1., 1.]
+    # env_cfg.commands.ranges.ang_vel_yaw = [0., 0.]
+    # env_cfg.commands.ranges.heading = [0, 0]
+
+    #
+    env_cfg.domain_rand.push_robots = False
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)

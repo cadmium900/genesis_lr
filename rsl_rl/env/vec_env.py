@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
-# 
+#
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
 #
@@ -40,7 +40,7 @@ class VecEnv(ABC):
     num_actions: int
     max_episode_length: int
     privileged_obs_buf: torch.Tensor
-    obs_buf: torch.Tensor 
+    obs_buf: torch.Tensor
     rew_buf: torch.Tensor
     reset_buf: torch.Tensor
     episode_length_buf: torch.Tensor # current episode duration
@@ -57,4 +57,7 @@ class VecEnv(ABC):
         pass
     @abstractmethod
     def get_privileged_observations(self) -> Union[torch.Tensor, None]:
+        pass
+    @abstractmethod
+    def get_camera(self):
         pass
