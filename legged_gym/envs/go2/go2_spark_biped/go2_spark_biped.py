@@ -1114,6 +1114,7 @@ class GO2SparkBiped(BaseTask):
                 quat=np.array(self.cfg.init_state.rot),
                 fixed= self.cfg.asset.fix_base_link,
             ),
+            vis_mode="collision",
             visualize_contact=self.debug,
         )
         print(f"[create_envs:robot] Latency {time.time() - start}")
@@ -1135,6 +1136,8 @@ class GO2SparkBiped(BaseTask):
         start = time.time()
         dof_idx = [self.robot.get_joint(name).dof_start for name in self.cfg.asset.dof_names]
         self.motors_dof_idx = torch.as_tensor(dof_idx, dtype=gs.tc_int, device=gs.device)
+
+        self._validate_joint_indices(dof_idx)
 
         self.joint_dof_mapping = {name: idx for idx, name in enumerate(self.cfg.asset.dof_names)}
         for k, v in self.joint_dof_mapping.items():
@@ -1294,10 +1297,36 @@ class GO2SparkBiped(BaseTask):
         self.dof_names = self.cfg.asset.dof_names
         self.debug = self.cfg.env.debug
 
+    def _validate_joint_indices(self, dof_idx):
+        """Validate that configured DOFs exist in the loaded robot and map uniquely."""
+        expected_n = len(self.cfg.asset.dof_names)
+        if len(dof_idx) != expected_n:
+            raise ValueError(f"DOF count mismatch: config {expected_n}, robot {len(dof_idx)}")
+
+        duplicate_idx = [idx for idx in set(dof_idx) if dof_idx.count(idx) > 1]
+        if duplicate_idx:
+            raise ValueError(f"Duplicate DOF indices found: {duplicate_idx} for {self.cfg.asset.dof_names}")
+
+        robot_joint_map = {j.name: j for j in self.robot.joints}
+        missing_robot = [name for name in self.cfg.asset.dof_names if name not in robot_joint_map]
+        if missing_robot:
+            raise ValueError(f"Configured joints not found in loaded robot: {missing_robot}")
+
+        mismatch = {}
+        for name, idx in zip(self.cfg.asset.dof_names, dof_idx):
+            joint = robot_joint_map[name]
+            if joint.dof_start != idx:
+                mismatch[name] = {"robot_dof_start": joint.dof_start, "configured_idx": idx}
+        if mismatch:
+            raise ValueError(f"DOF start mismatch in loaded robot: {mismatch}")
+
+        mapping = {name: {"dof_idx": idx, "robot_dof_start": robot_joint_map[name].dof_start} for name, idx in zip(self.cfg.asset.dof_names, dof_idx)}
+        print(f"[INFO] DOF mapping (name -> dof_idx / robot_dof_start): {mapping}")
+
     def _neg_reward_hip_pos(self):
         # Negative reward
-        hip_joint_indices_all = [0, 3, 6, 9]
-        hip_joint_indices_rear = [6, 9]
+        hip_joint_indices_all = [0, 3, 6, 10]
+        hip_joint_indices_rear = [6, 10]
         pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
         # Only penalize hips joints rear when upright standing
         dof_pos_error = torch.where(pitch_error < 0.2,
@@ -1407,7 +1436,8 @@ class GO2SparkBiped(BaseTask):
         return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_orientation(self):
-        pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
+        pitch_angle = torch.atan2(self.base_axis_fwd[:, 2], torch.norm(self.base_axis_fwd[:, :2], dim=1))
+        pitch_error = torch.abs(pitch_angle - 1.570796)
         tracking_reward = torch.exp(-pitch_error / self.cfg.rewards.euler_tracking_sigma)
         return tracking_reward
 
@@ -1503,7 +1533,7 @@ class GO2SparkBiped(BaseTask):
                                  torch.abs(self.base_lin_vel[:, 2]) > 0.05) # z (front)
             )
         )
-        rew_standing = 1.0*both - 0.8*none - 0.8*single
+        rew_standing = 1.0*both - 1.0*none - 1.0*single
         rew_moving = 1.0*single - 0.3*both - 0.8*none
         reward = torch.where(moving, rew_moving, rew_standing)
         gate = self._biped_orientation_gate()
@@ -1522,8 +1552,9 @@ class GO2SparkBiped(BaseTask):
 
         clearance_error = torch.sum(swing_mask * below_target ** 2, dim=-1)
         reward = torch.exp(-clearance_error / self.cfg.rewards.foot_clearance_tracking_sigma)
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
+        return reward
+        #gate = self._biped_orientation_gate()
+        #return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_com_over_support(self):
         p_rl = self.feet_pos[:, 2, :2]

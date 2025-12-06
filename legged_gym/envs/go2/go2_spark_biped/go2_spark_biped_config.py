@@ -6,20 +6,20 @@ class GO2SparkBipedCfg(BaseConfig):
         episode_length_s = 20 # episode length in seconds
         num_envs = 22000
         env_spacing = 1.0
-        num_actions = 12
+        num_actions = 14
         # observation history
         frame_stack = 5   # policy frame stack
         c_frame_stack = 5  # critic frame stack
-        num_single_obs = 61
+        num_single_obs = 67
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 98
+        single_num_privileged_obs = 108
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
         debug_viz = False
 
     class terrain:
-        mesh_type = 'heightfield' # "heightfield" # none, plane, heightfield
+        mesh_type = 'plane' # "heightfield" # none, plane, heightfield
         plane_length = 200.0 # [m]. plane size is 200x200x10 by default
         horizontal_scale = 0.22 # [m] reduce vertex count for terrain mesh SDF
         vertical_scale = 0.005 # [m]
@@ -83,6 +83,9 @@ class GO2SparkBipedCfg(BaseConfig):
             'RL_calf_joint': -1.5,    # [rad]
             'FR_calf_joint': -1.5,  # [rad]
             'RR_calf_joint': -1.5,    # [rad]
+
+            'RL_foot_joint': 0.0,
+            'RR_foot_joint': 0.0,
         }
 
     class control:
@@ -97,7 +100,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
     class asset:
         name = "go2" # name of the robot
-        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2.urdf'
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2_biped/urdf/go2.urdf'
         dof_names = [        # specify the sequence of actions
             'FR_hip_joint',
             'FR_thigh_joint',
@@ -108,9 +111,11 @@ class GO2SparkBipedCfg(BaseConfig):
             'RR_hip_joint',
             'RR_thigh_joint',
             'RR_calf_joint',
+            'RR_foot_joint',
             'RL_hip_joint',
             'RL_thigh_joint',
-            'RL_calf_joint',]
+            'RL_calf_joint',
+            'RL_foot_joint']
         foot_name = ["foot"]
         penalize_contacts_on = ["thigh", "calf", "hip", "base"]
         terminate_after_contacts_on = ["base", "calf", "thigh", "hip"]
@@ -146,7 +151,7 @@ class GO2SparkBipedCfg(BaseConfig):
         soft_dof_pos_limit = 0.9
         soft_dof_vel_limit = 1.
         foot_height_offset = 0.022 # height of the foot coordinate origin above ground [m]
-        euler_tracking_sigma = 0.05
+        euler_tracking_sigma = 0.1745 #0.05
         only_positive_rewards = True
         tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
         soft_torque_limit = 1.
@@ -164,12 +169,12 @@ class GO2SparkBipedCfg(BaseConfig):
         class scales:
             front_feet_off = 0.8
             front_feet_on_ground_push = 0.0025
-            hind_alternation = 0.9
-            com_over_support = 0.9
-            tracking_lin_vel = 1.5
-            tracking_ang_vel = 0.8
-            orientation = 1.0
-            base_height_target = 0.5
+            hind_alternation = 0.8
+            com_over_support = 1.0
+            tracking_lin_vel = 0.9
+            tracking_ang_vel = 0.65
+            orientation = 1.5
+            base_height_target = 0.8
             hind_foot_clearance = 0.8
             arm_angles = 0.5
 
@@ -254,7 +259,7 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Nov19_13-58-45_spark"
+        load_run = "Dec05_22-28-42_spark"
         checkpoint = -1
         max_iterations = 3000
         num_steps_per_env = 16 #32
