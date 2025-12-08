@@ -749,18 +749,19 @@ Stephen Brawner (brawner@gmail.com)
   <link
     name="RL_calf">
     <inertial>
+      <!-- original calf (0.154 kg) + 0.5 kg actuator at (0, 0, -0.1065) -->
       <origin
-        xyz="0.00548 -0.000975 -0.115"
+        xyz="0.0012904 -0.0002296 -0.108502"
         rpy="0 0 0" />
       <mass
-        value="0.154" />
+        value="0.654" />
       <inertia
-        ixx="0.00108"
-        ixy="3.4E-07"
-        ixz="1.72E-05"
-        iyy="0.0011"
-        iyz="8.28E-06"
-        izz="3.29E-05" />
+        ixx="0.00168862"
+        ixy="9.69069e-07"
+        ixz="2.26842e-05"
+        iyy="0.00171204"
+        iyz="7.30425e-06"
+        izz="0.000136548" />
     </inertial>
     <visual>
       <origin
@@ -852,14 +853,14 @@ Stephen Brawner (brawner@gmail.com)
         xyz="0 0 0"
         rpy="0 0 0" />
       <mass
-        value="0.04" />
+        value="0.10" />
       <inertia
-        ixx="9.6e-06"
+        ixx="0.00010587"
         ixy="0"
         ixz="0"
-        iyy="9.6e-06"
+        iyy="0.00010587"
         iyz="0"
-        izz="9.6e-06" />
+        izz="0.00016667" />
     </inertial>
     <visual>
       <origin
@@ -898,8 +899,8 @@ Stephen Brawner (brawner@gmail.com)
     <limit
       lower="-0.8"
       upper="0.8"
-      effort="23.7"
-      velocity="10.1" />
+      effort="10.0"
+      velocity="5.0" />
   </joint>
   <link
     name="RR_hip">
@@ -1014,18 +1015,19 @@ Stephen Brawner (brawner@gmail.com)
   <link
     name="RR_calf">
     <inertial>
+      <!-- original calf (0.154 kg) + 0.5 kg actuator at (0, 0, -0.1065) -->
       <origin
-        xyz="0.00548 0.000975 -0.115"
+        xyz="0.0012904 0.0002296 -0.108502"
         rpy="0 0 0" />
       <mass
-        value="0.154" />
+        value="0.654" />
       <inertia
-        ixx="0.00108"
-        ixy="-3.4E-07"
-        ixz="1.72E-05"
-        iyy="0.0011"
-        iyz="-8.28E-06"
-        izz="3.29E-05" />
+        ixx="0.00168862"
+        ixy="-9.69069e-07"
+        ixz="2.26842e-05"
+        iyy="0.00171204"
+        iyz="-7.30425e-06"
+        izz="0.000136548" />
     </inertial>
     <visual>
       <origin
@@ -1117,14 +1119,14 @@ Stephen Brawner (brawner@gmail.com)
         xyz="0 0 0"
         rpy="0 0 0" />
       <mass
-        value="0.04" />
+        value="0.10" />
       <inertia
-        ixx="9.6e-06"
+        ixx="0.00010587"
         ixy="0"
         ixz="0"
-        iyy="9.6e-06"
+        iyy="0.00010587"
         iyz="0"
-        izz="9.6e-06" />
+        izz="0.00016667" />
     </inertial>
     <visual>
       <origin
@@ -1163,8 +1165,8 @@ Stephen Brawner (brawner@gmail.com)
     <limit
       lower="-0.8"
       upper="0.8"
-      effort="23.7"
-      velocity="10.1" />
+      effort="10.0"
+      velocity="5.0" />
   </joint>
   <link
     name="imu">

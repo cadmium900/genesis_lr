@@ -4,7 +4,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
     class env:
         episode_length_s = 20 # episode length in seconds
-        num_envs = 22000
+        num_envs = 21500
         env_spacing = 1.0
         num_actions = 14
         # observation history
@@ -12,7 +12,7 @@ class GO2SparkBipedCfg(BaseConfig):
         c_frame_stack = 5  # critic frame stack
         num_single_obs = 67
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 108
+        single_num_privileged_obs = 105
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
@@ -46,7 +46,7 @@ class GO2SparkBipedCfg(BaseConfig):
     class commands:
         curriculum = True
         heading_command = True  # if true: compute ang vel command from heading error
-        resampling_time = 3.0  # time before command are changed[s]
+        resampling_time = 6.0  # time before command are changed[s]
         max_curriculum = 1.
         # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         num_commands = 4
@@ -55,7 +55,7 @@ class GO2SparkBipedCfg(BaseConfig):
         curriculum_threshold = 0.6
         min_normal = 0.05
         class ranges:
-            lin_vel_x = [-1.0, 1.0]
+            lin_vel_x = [-0.5, 2.0]
             lin_vel_y = [-0.01, 0.01] # Was -0.2, 0.2
             ang_vel_yaw = [-0.5, 0.5]
             heading = [-3.14, 3.14]
@@ -130,8 +130,8 @@ class GO2SparkBipedCfg(BaseConfig):
         randomize_base_mass = enable
         added_mass_range = [-1., 1.]
         push_robots = enable
-        push_interval_s = 15
-        max_push_vel_xy = 1.
+        push_interval_s = 8 # 15
+        max_push_vel_xy = 1.5 #1.
         randomize_com_displacement = enable
         com_displacement_range = [-0.07, 0.07]
         randomize_ctrl_delay = False
@@ -161,22 +161,31 @@ class GO2SparkBipedCfg(BaseConfig):
         thigh_angle_sigma = 0.5
         calf_angle_sigma = 0.5
         arm_angle_sigma = 0.5
+        feet_under_base_sigma = 0.08
+        feet_under_base_height_thresh = 0.5
+        hind_spread_sigma = 0.1
+        foot_orientation_sigma = 0.1
+        foot_orientation_force_scale = 50.0
         biped_shaping_pitch_window = 0.90
         biped_shaping_front_weight = 0.6
         biped_shaping_com_weight = 0.4
 
 
         class scales:
-            front_feet_off = 0.8
+            front_feet_off = 0.35
             front_feet_on_ground_push = 0.0025
-            hind_alternation = 0.8
-            com_over_support = 1.0
-            tracking_lin_vel = 0.9
+            hind_alternation = 0.82
+            com_over_support = 0.5
+            tracking_lin_vel = 1.5
             tracking_ang_vel = 0.65
             orientation = 1.5
-            base_height_target = 0.8
-            hind_foot_clearance = 0.8
+            base_height_target = 0.6
+            hind_foot_clearance = 0.82
             arm_angles = 0.5
+            feet_under_base = 0.45
+            hind_spread_contact = -0.2
+            static_walk = -1.9
+            #foot_orientation = 0.4
 
             dof_pos_limits = -10.0
             collision = -1.0
@@ -192,7 +201,7 @@ class GO2SparkBipedCfg(BaseConfig):
             resampling_time = 6.0
             gait_period_range = [0.40, 0.60]
             foot_clearance_target_range = [0.26, 0.29]
-            base_height_target_range = [0.60, 0.65]
+            base_height_target_range = [0.50, 0.65]
             pitch_target_range = [1.0, 1.0]
 
     class normalization:
@@ -259,9 +268,9 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Dec05_22-28-42_spark"
+        load_run = "Dec07_10-23-08_spark"
         checkpoint = -1
-        max_iterations = 3000
+        max_iterations = 5000
         num_steps_per_env = 16 #32
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
