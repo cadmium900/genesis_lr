@@ -62,3 +62,5 @@ wandb
 *.tic
 *.tcb
 *.png
+
+legged_gym/scripts/cache/
