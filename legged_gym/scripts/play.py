@@ -55,7 +55,7 @@ def play(args):
     env_cfg.init_state.yaw_angle_range = [0., 0.]
     # velocity range
 
-    env_cfg.commands.ranges.lin_vel_x = [1.0, 1.0]
+    env_cfg.commands.ranges.lin_vel_x = [-0.5, 1.5]
     # env_cfg.commands.ranges.lin_vel_y = [-1., 1.]
     # env_cfg.commands.ranges.ang_vel_yaw = [0., 0.]
     # env_cfg.commands.ranges.heading = [0, 0]

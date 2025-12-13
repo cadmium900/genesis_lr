@@ -877,7 +877,7 @@ Stephen Brawner (brawner@gmail.com)
       </material>
     </visual>
     <collision>
-      <origin rpy="0 0.56 0" xyz="0.02 0 0" />
+      <origin rpy="0 0 0" xyz="0.02 0 0" />
       <geometry>
         <!-- <sphere radius="0.022" /> -->
         <box size="0.10 0.10 0.052" />
@@ -897,7 +897,7 @@ Stephen Brawner (brawner@gmail.com)
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-0.8"
+      lower="-0.3"
       upper="0.8"
       effort="10.0"
       velocity="5.0" />
@@ -1143,7 +1143,7 @@ Stephen Brawner (brawner@gmail.com)
       </material>
     </visual>
     <collision>
-      <origin rpy="0 0.56 0" xyz="0.02 0 0" />
+      <origin rpy="0 0 0" xyz="0.02 0 0" />
       <geometry>
         <!-- <sphere radius="0.022" /> -->
         <box size="0.10 0.10 0.052" />
@@ -1163,7 +1163,7 @@ Stephen Brawner (brawner@gmail.com)
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-0.8"
+      lower="-0.3"
       upper="0.8"
       effort="10.0"
       velocity="5.0" />

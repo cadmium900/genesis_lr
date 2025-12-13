@@ -200,6 +200,7 @@ class GO2SparkBiped(BaseTask):
         # prepare quantities
         self.base_pos[:] = self.robot.get_pos()
         self.base_quat[:] = self.robot.get_quat()
+        prev_base_lin_vel_world = self.base_lin_vel_world.clone()
 
         R_wb = quat_to_mat(self.base_quat)         # world-from-body
         self.base_axis_fwd   = torch.nn.functional.normalize(R_wb[:, :, 0], dim=-1)  # body +X (dog-forward)
@@ -209,14 +210,26 @@ class GO2SparkBiped(BaseTask):
         base_quat_rel = gs_quat_mul(self.base_quat, gs_inv_quat(self.base_init_quat.reshape(1, -1).repeat(self.num_envs, 1)))
         self.base_euler = gs_quat2euler(base_quat_rel)
         inv_base_quat = inv_quat(self.base_quat)
-        self.base_lin_vel[:] = transform_by_quat(self.robot.get_vel(), inv_base_quat) # transform to base frame
-        self.base_ang_vel[:] = transform_by_quat(self.robot.get_ang(), inv_base_quat)
+        self.base_lin_vel_world[:] = torch.nan_to_num(self.robot.get_vel(), nan=0.0, posinf=0.0, neginf=0.0)
+        self.base_lin_acc_world[:] = (self.base_lin_vel_world - prev_base_lin_vel_world) / self.dt
+        acc_world_with_gravity = self.base_lin_acc_world - self.gravity_world
+        self.base_lin_acc_body[:] = transform_by_quat(acc_world_with_gravity, inv_base_quat)
+        self.base_lin_vel[:] = transform_by_quat(self.base_lin_vel_world, inv_base_quat) # transform to base frame
+        self.base_ang_vel[:] = transform_by_quat(torch.nan_to_num(self.robot.get_ang(), nan=0.0, posinf=0.0, neginf=0.0), inv_base_quat)
         self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
+        self.prev_base_lin_vel_world[:] = self.base_lin_vel_world
         self.dof_pos[:] = self.robot.get_dofs_position(self.motors_dof_idx)
         self.dof_vel[:] = self.robot.get_dofs_velocity(self.motors_dof_idx)
         self.link_contact_forces[:] = self.robot.get_links_net_contact_force()
         self.feet_pos[:] = self.robot.get_links_pos()[:, self.feet_indices, :]
         self.feet_vel[:] = self.robot.get_links_vel()[:, self.feet_indices, :]
+        all_links_quat = self.robot.get_links_quat()
+        self.feet_quat[:] = all_links_quat[:, self.feet_indices, :]
+        flat_quat = self.feet_quat.reshape(-1, 4)
+        foot_up = torch.zeros_like(flat_quat[:, :3])
+        foot_up[:, 2] = 1.0
+        flat_up_world = transform_by_quat(foot_up, flat_quat)
+        self.feet_up_world[:] = flat_up_world.reshape(self.num_envs, len(self.feet_indices), 3)
 
         #print(f"angle_fl: {torch.rad2deg(angle_between_vectors(self.feet_pos[:, 0, :], self.base_head_pitch))}")
         pos_t = self.scene.rigid_solver.get_links_pos(self.links_idx, envs_idx=None)
@@ -249,6 +262,10 @@ class GO2SparkBiped(BaseTask):
         self.last_dof_vel[:] = self.dof_vel[:]
         if self.debug_viz:
             self._draw_debug_vis(env_ids)
+
+    def get_base_acc_with_gravity(self):
+        """Base-frame linear acceleration including gravity (simulated accelerometer reading)."""
+        return self.base_lin_acc_body
 
     def _draw_debug_vis(self, env_ids):
         """ Draws visualizations for debugging (slows down simulation a lot).
@@ -455,7 +472,8 @@ class GO2SparkBiped(BaseTask):
         obs_buf = torch.cat((
             self.commands[:, :3] * self.commands_scale,    # cmd     3
             self.projected_gravity,                        # g       3
-            self.base_lin_vel * self.obs_scales.lin_vel,   # omega   3
+            #self.base_lin_vel * self.obs_scales.lin_vel,   # omega   3
+            self.base_lin_acc_body,
             self.base_ang_vel * self.obs_scales.ang_vel,   # omega   3
             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,                       # p_t     12
             self.dof_vel * self.obs_scales.dof_vel,        # dp_t    12
@@ -477,6 +495,7 @@ class GO2SparkBiped(BaseTask):
         if self.num_privileged_obs is not None:  # critic_obs, no noise
             self.privileged_obs_buf = torch.cat((
                 self.base_lin_vel * self.obs_scales.lin_vel,   # v_t     3
+                self.base_lin_acc_body,
                 self.commands[:, :3] * self.commands_scale,    # cmd_t   3
                 self.projected_gravity,                        # g_t     3
                 self.base_ang_vel * self.obs_scales.ang_vel,   # omega_t 3
@@ -576,6 +595,7 @@ class GO2SparkBiped(BaseTask):
         if self.cfg.commands.curriculum:
             self.extras["episode"]["cur_command_x"] = self.commands[0, 0]
             self.extras["episode"]["cur_command_y"] = self.commands[0, 1]
+            self.extras["episode"]["cur_command_yaw"] = self.commands[0, 2]
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
@@ -715,6 +735,13 @@ class GO2SparkBiped(BaseTask):
         # update projected gravity
         inv_base_quat = gs_inv_quat(self.base_quat)
         self.projected_gravity = gs_transform_by_quat(self.global_gravity, inv_base_quat)
+        self.base_lin_vel_world[envs_idx] = 0.0
+        self.prev_base_lin_vel_world[envs_idx] = 0.0
+        self.base_lin_acc_world[envs_idx] = 0.0
+        self.base_lin_acc_body[envs_idx] = 0.0
+        self.base_lin_vel_world_est[envs_idx] = 0.0
+        self.base_lin_vel_est[envs_idx] = 0.0
+        self.acc_bias_est[envs_idx] = 0.0
 
         # reset root states - velocity
         self.base_lin_vel[envs_idx] = (gs_rand_float(-0.5, 0.5, (len(envs_idx), 3), self.device))
@@ -951,7 +978,7 @@ class GO2SparkBiped(BaseTask):
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
-        # Observation layout (per frame): cmd(3), grav(3), base_lin_vel(3), base_ang_vel(3),
+        # Observation layout (per frame): cmd(3), grav(3), base_lin_acc(3), base_ang_vel(3),
         # dof_pos(14), dof_vel(14), last_actions(14), clock(1), gait(1), base_h(1),
         # foot_clearance(1), fixed_pitch(1), arm_left(4), arm_right(4)
         i = 0
@@ -959,7 +986,7 @@ class GO2SparkBiped(BaseTask):
         i += 3
         noise_vec[i:i+3] = noise_scales.gravity * noise_level
         i += 3
-        noise_vec[i:i+3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+        noise_vec[i:i+3] = noise_scales.lin_vel * noise_level  # accel (no obs scaling applied)
         i += 3
         noise_vec[i:i+3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
         i += 3
@@ -991,11 +1018,19 @@ class GO2SparkBiped(BaseTask):
         self.base_init_pos = torch.tensor(self.cfg.init_state.pos, device=self.device, dtype=gs.tc_float).contiguous()
         self.base_init_quat = torch.tensor(self.cfg.init_state.rot, device=self.device)
         self.base_lin_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_lin_vel_world = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.base_ang_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_lin_acc_world = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_lin_acc_body = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)  # accelerometer-style (includes gravity)
+        self.base_lin_vel_world_est = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.base_lin_vel_est = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.prev_base_lin_vel_world = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
+        self.acc_bias_est = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.biped_base_lin_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.biped_base_ang_vel = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.projected_gravity = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.global_gravity = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=gs.tc_float).repeat(self.num_envs, 1)
+        self.gravity_world = torch.tensor(self.cfg.sim.gravity, device=self.device, dtype=gs.tc_float).repeat(self.num_envs, 1)
         self.commands = torch.zeros((self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=gs.tc_float)
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                             device=self.device, dtype=gs.tc_float, requires_grad=False,)
@@ -1018,6 +1053,8 @@ class GO2SparkBiped(BaseTask):
         self.link_contact_forces = torch.zeros((self.num_envs, self.robot.n_links, 3), device=self.device, dtype=gs.tc_float)
         self.feet_pos = torch.zeros((self.num_envs, len(self.feet_indices), 3), device=self.device, dtype=gs.tc_float)
         self.feet_vel = torch.zeros((self.num_envs, len(self.feet_indices), 3), device=self.device, dtype=gs.tc_float)
+        self.feet_quat = torch.zeros((self.num_envs, len(self.feet_indices), 4), device=self.device, dtype=gs.tc_float)
+        self.feet_up_world = torch.zeros((self.num_envs, len(self.feet_indices), 3), device=self.device, dtype=gs.tc_float)
         self.continuous_push = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.env_identities = torch.arange(self.num_envs, device=self.device, dtype=gs.tc_int,)
         self.terrain_heights = torch.zeros((self.num_envs,), device=self.device, dtype=gs.tc_float, )
@@ -1373,6 +1410,23 @@ class GO2SparkBiped(BaseTask):
         # Penalize collisions on selected bodies
         return torch.sum(10.*(torch.norm(self.link_contact_forces[:, self.penalized_indices, :], dim=-1) > 0.1), dim=1)
 
+    def _neg_reward_foot_orientation(self):
+        """Penalize feet that contact the ground with large tilt (not flat)."""
+        # Contact mask: any meaningful force on the feet
+        contact_mag = torch.norm(self.link_contact_forces[:, self.feet_indices, :], dim=-1)
+        contact_mask = (contact_mag > 1.0).float()
+
+        # Foot "up" vector in world; compare to world up (gravity opposite)
+        world_up = torch.tensor([0.0, 0.0, 1.0], device=self.device, dtype=gs.tc_float)
+        cos_theta = torch.abs(torch.sum(self.feet_up_world * world_up, dim=-1)).clamp(-1.0, 1.0)
+        angle = torch.acos(cos_theta)
+
+        sigma = self.cfg.rewards.foot_orientation_sigma
+        tilt_cost = 1.0 - torch.exp(-(angle ** 2) / (2 * sigma * sigma))
+
+        # zero cost when not in contact
+        return torch.sum(tilt_cost * contact_mask, dim=1)
+
     def _neg_reward_termination(self):
         # Terminal reward / penalty
         return self.reset_buf * ~self.time_out_buf
@@ -1556,9 +1610,9 @@ class GO2SparkBiped(BaseTask):
 
         # reward exactly one in contact (and softly penalize both/none)
         # if no commands (standing still) then reward both feet
-        cmd_xy = self.commands[:, :2]
+        cmd_xy_yaw = self.commands[:, :3]
         moving = torch.logical_or(
-            torch.norm(cmd_xy, dim=1) >= self.cfg.commands.min_normal,
+            torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal,
             torch.logical_or(
                 torch.abs(self.base_ang_vel[:, 0]) > 0.05,
                 torch.logical_or(torch.abs(self.base_lin_vel[:, 1]) > 0.05, # y
@@ -1591,7 +1645,7 @@ class GO2SparkBiped(BaseTask):
         below_target = torch.clamp(target - hind_height, min=0.0)
 
         # Deadzone on command magnitude; skip when essentially stationary
-        cmd_mag = torch.norm(self.commands[:, :2], dim=1)
+        cmd_mag = torch.norm(self.commands[:, :3], dim=1)
         cmd_gate = (cmd_mag > 0.05).float()
 
         # Penalize clearance error only when (a) command present and (b) swing foot not in contact
@@ -1613,8 +1667,8 @@ class GO2SparkBiped(BaseTask):
         hind_contact = (self.link_contact_forces[:, self.feet_indices[2:], 2].abs() > 1.0)
         hind_contact_any = hind_contact.any(dim=1)
 
-        cmd_xy = self.commands[:, :2]
-        moving = torch.norm(cmd_xy, dim=1) >= self.cfg.commands.min_normal
+        cmd_xy_yaw = self.commands[:, :3]
+        moving = torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal
         active = (~moving)
         # Ones like reward to encourage moving
         reward = torch.where(active & hind_contact_any, reward, torch.ones_like(reward))
@@ -1633,8 +1687,8 @@ class GO2SparkBiped(BaseTask):
 
     def _neg_reward_hind_spread_contact(self):
         """Penalize hind feet fore–aft spread when both are in contact and not moving."""
-        cmd_xy = self.commands[:, :2]
-        moving = torch.norm(cmd_xy, dim=1) >= self.cfg.commands.min_normal
+        cmd_xy_yaw = self.commands[:, :3]
+        moving = torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal
         hind_contact = (self.link_contact_forces[:, self.feet_indices[2:], 2].abs() > 1.0)
         both_contact = hind_contact.all(dim=1)
 
@@ -1660,7 +1714,7 @@ class GO2SparkBiped(BaseTask):
         f_rr = self._contact_mag(self.foot_index_rr) > 1.0
         both = (f_rl & f_rr).float()  # [B]
 
-        cmd = self.commands[:, :2]       # [B, 2]
+        cmd = self.commands[:, :3]       # [B, 3]
         cmd_mag = torch.norm(cmd, dim=1) # [B]
 
         deadzone = 0.05

@@ -12,7 +12,7 @@ class GO2SparkBipedCfg(BaseConfig):
         c_frame_stack = 5  # critic frame stack
         num_single_obs = 67
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 105
+        single_num_privileged_obs = 108
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
@@ -45,7 +45,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
     class commands:
         curriculum = True
-        heading_command = True  # if true: compute ang vel command from heading error
+        heading_command = False  # if true: compute ang vel command from heading error
         resampling_time = 6.0  # time before command are changed[s]
         max_curriculum = 1.
         # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
@@ -56,8 +56,8 @@ class GO2SparkBipedCfg(BaseConfig):
         min_normal = 0.05
         class ranges:
             lin_vel_x = [-0.5, 2.0]
-            lin_vel_y = [-0.01, 0.01] # Was -0.2, 0.2
-            ang_vel_yaw = [-0.5, 0.5]
+            lin_vel_y = [-0.05, 0.05] # Was -0.2, 0.2
+            ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
     class init_state:
@@ -151,7 +151,7 @@ class GO2SparkBipedCfg(BaseConfig):
         soft_dof_pos_limit = 0.9
         soft_dof_vel_limit = 1.
         foot_height_offset = 0.022 # height of the foot coordinate origin above ground [m]
-        euler_tracking_sigma = 0.1745 #0.05
+        euler_tracking_sigma = 0.1745
         only_positive_rewards = True
         tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
         soft_torque_limit = 1.
@@ -165,9 +165,7 @@ class GO2SparkBipedCfg(BaseConfig):
         feet_under_base_height_thresh = 0.5
         hind_spread_sigma = 0.1
         foot_orientation_sigma = 0.1
-        foot_orientation_force_scale = 50.0
         biped_shaping_pitch_window = 0.90
-        biped_shaping_front_weight = 0.6
         biped_shaping_com_weight = 0.4
 
 
@@ -177,15 +175,15 @@ class GO2SparkBipedCfg(BaseConfig):
             hind_alternation = 0.82
             com_over_support = 0.5
             tracking_lin_vel = 1.5
-            tracking_ang_vel = 0.65
+            tracking_ang_vel = 0.85
             orientation = 1.5
             base_height_target = 0.6
             hind_foot_clearance = 0.82
             arm_angles = 0.5
             feet_under_base = 0.45
-            hind_spread_contact = -0.2
+            hind_spread_contact = -1.5
             static_walk = -1.9
-            #foot_orientation = 0.4
+            foot_orientation = -0.3
 
             dof_pos_limits = -10.0
             collision = -1.0
@@ -199,7 +197,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
         class behavior_params_range:
             resampling_time = 6.0
-            gait_period_range = [0.40, 0.60]
+            gait_period_range = [0.30, 0.60]
             foot_clearance_target_range = [0.26, 0.29]
             base_height_target_range = [0.50, 0.65]
             pitch_target_range = [1.0, 1.0]
@@ -268,7 +266,7 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Dec07_10-23-08_spark"
+        load_run = "Dec12_20-16-24_spark"
         checkpoint = -1
         max_iterations = 5000
         num_steps_per_env = 16 #32
