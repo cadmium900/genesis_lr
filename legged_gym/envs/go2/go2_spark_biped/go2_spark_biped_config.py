@@ -6,13 +6,13 @@ class GO2SparkBipedCfg(BaseConfig):
         episode_length_s = 20 # episode length in seconds
         num_envs = 21500
         env_spacing = 1.0
-        num_actions = 14
+        num_actions = 12
         # observation history
         frame_stack = 5   # policy frame stack
         c_frame_stack = 5  # critic frame stack
-        num_single_obs = 67
+        num_single_obs = 61
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 108
+        single_num_privileged_obs = 98
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
@@ -56,7 +56,7 @@ class GO2SparkBipedCfg(BaseConfig):
         min_normal = 0.05
         class ranges:
             lin_vel_x = [-0.5, 2.0]
-            lin_vel_y = [-0.05, 0.05] # Was -0.2, 0.2
+            lin_vel_y = [-0.08, 0.08] # Was -0.2, 0.2
             ang_vel_yaw = [-1.0, 1.0]
             heading = [-3.14, 3.14]
 
@@ -83,9 +83,6 @@ class GO2SparkBipedCfg(BaseConfig):
             'RL_calf_joint': -1.5,    # [rad]
             'FR_calf_joint': -1.5,  # [rad]
             'RR_calf_joint': -1.5,    # [rad]
-
-            'RL_foot_joint': 0.0,
-            'RR_foot_joint': 0.0,
         }
 
     class control:
@@ -111,11 +108,10 @@ class GO2SparkBipedCfg(BaseConfig):
             'RR_hip_joint',
             'RR_thigh_joint',
             'RR_calf_joint',
-            'RR_foot_joint',
             'RL_hip_joint',
             'RL_thigh_joint',
             'RL_calf_joint',
-            'RL_foot_joint']
+        ]
         foot_name = ["foot"]
         penalize_contacts_on = ["thigh", "calf", "hip", "base"]
         terminate_after_contacts_on = ["base", "calf", "thigh", "hip"]
@@ -156,6 +152,7 @@ class GO2SparkBipedCfg(BaseConfig):
         tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
         soft_torque_limit = 1.
         foot_clearance_tracking_sigma = 0.1
+        heavy_foot_sigma = 0.1
         base_height_tracking_sigma = 0.25
         front_arm_angle_sigma = 0.5
         thigh_angle_sigma = 0.5
@@ -179,18 +176,20 @@ class GO2SparkBipedCfg(BaseConfig):
             orientation = 1.5
             base_height_target = 0.6
             hind_foot_clearance = 0.82
-            arm_angles = 0.5
+            arm_angles = 0.8
             feet_under_base = 0.45
             hind_spread_contact = -1.5
             static_walk = -1.9
             foot_orientation = -0.3
+            trot_in_place = -3.0
 
+            #heavy_foot = -0.3
             dof_pos_limits = -10.0
             collision = -1.0
             dof_vel = -5e-4
             dof_acc = -2e-7
             action_rate = -0.003
-            action_smoothness = -0.03
+            action_smoothness = -0.05
             hip_pos = -0.5
             pitch_rate = -10.0
             termination = -0.0
@@ -266,7 +265,7 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Dec12_20-16-24_spark"
+        load_run = "Dec14_20-44-40_spark"
         checkpoint = -1
         max_iterations = 5000
         num_steps_per_env = 16 #32

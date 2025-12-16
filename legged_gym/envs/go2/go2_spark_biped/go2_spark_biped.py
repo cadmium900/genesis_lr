@@ -225,6 +225,7 @@ class GO2SparkBiped(BaseTask):
         self.feet_vel[:] = self.robot.get_links_vel()[:, self.feet_indices, :]
         all_links_quat = self.robot.get_links_quat()
         self.feet_quat[:] = all_links_quat[:, self.feet_indices, :]
+
         flat_quat = self.feet_quat.reshape(-1, 4)
         foot_up = torch.zeros_like(flat_quat[:, :3])
         foot_up[:, 2] = 1.0
@@ -247,14 +248,17 @@ class GO2SparkBiped(BaseTask):
         # Periodic Reward Framework phi cycle
         # step after computing reward but before resetting the env
         self.gait_time += self.dt
+
         # +self.dt/2 in case of float precision errors
         is_over_limit = (self.gait_time >= (self.gait_period - self.dt / 2))
         over_limit_indices = is_over_limit.nonzero(as_tuple=False).flatten()
         self.gait_time[over_limit_indices] = 0.0
         self.phi = self.gait_time / self.gait_period
+
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         if self.num_build_envs > 0:
             self.reset_idx(env_ids)
+
         self._calc_periodic_reward_obs()
         self.compute_observations() # in some cases a simulation step might be required to refresh some obs (for example body positions)
         self.llast_actions[:] = self.last_actions[:]
@@ -886,6 +890,10 @@ class GO2SparkBiped(BaseTask):
         self.clock_input[:] = torch.sin(2 * torch.pi * self.phi)
 
     def _post_physics_step_callback(self):
+        # Update stationary mask based on command magnitude
+        cmd_mag = torch.norm(self.commands[:, :3], dim=1)
+        self.is_stationary[:] = cmd_mag < self.cfg.commands.min_normal
+
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
 
@@ -979,7 +987,7 @@ class GO2SparkBiped(BaseTask):
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
         # Observation layout (per frame): cmd(3), grav(3), base_lin_acc(3), base_ang_vel(3),
-        # dof_pos(14), dof_vel(14), last_actions(14), clock(1), gait(1), base_h(1),
+        # dof_pos(12), dof_vel(12), last_actions(12), clock(1), gait(1), base_h(1),
         # foot_clearance(1), fixed_pitch(1), arm_left(4), arm_right(4)
         i = 0
         noise_vec[i:i+3] = 0.  # commands
@@ -1011,6 +1019,7 @@ class GO2SparkBiped(BaseTask):
         self.noise_scale_vec = self._get_noise_scale_vec()
         self.forward_vec = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.forward_vec[:, 0] = 1.0
+        self.is_stationary = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.tgt_rl_dir = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.tgt_rr_dir = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.vel_dir = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
@@ -1377,8 +1386,8 @@ class GO2SparkBiped(BaseTask):
 
     def _neg_reward_hip_pos(self):
         # Negative reward
-        hip_joint_indices_all = [0, 3, 6, 10]
-        hip_joint_indices_rear = [6, 10]
+        hip_joint_indices_all = [0, 3, 6, 9]
+        hip_joint_indices_rear = [6, 9]
         pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
         # Only penalize hips joints rear when upright standing
         dof_pos_error = torch.where(pitch_error < 0.2,
@@ -1459,7 +1468,7 @@ class GO2SparkBiped(BaseTask):
         # wrap to (-pi, pi]
         return torch.atan2(torch.sin(a - b), torch.cos(a - b))
 
-    def _biped_orientation_gate(self):
+    def _biped_orientation_gate(self, force_angle=None):
         # Gate shaping rewards: 1 when aligned, 0 when far from target
         # target = self.fixed_pitch_target.squeeze(1)
         # error = torch.abs(self.base_axis_fwd[:, 2] - target)
@@ -1468,7 +1477,11 @@ class GO2SparkBiped(BaseTask):
         # return 1.0 - gate
 
         pitch_angle = torch.atan2(self.base_axis_fwd[:, 2], torch.norm(self.base_axis_fwd[:, :2], dim=1))
-        target = 1.570796 # 90.0 degrees
+        if force_angle is None:
+            target = 1.570796 # 90.0 degrees
+        else:
+            target = force_angle
+
         error = torch.abs(pitch_angle - target)
 
         window = max(self.cfg.rewards.biped_shaping_pitch_window * target, 1e-6)
@@ -1581,7 +1594,7 @@ class GO2SparkBiped(BaseTask):
         f_fl_local = transform_by_quat(f_fl, inv_base_quat)  # Transform to local frame
         f_fr_local = transform_by_quat(f_fr, inv_base_quat)  # Transform to local frame
 
-        # Extract the X (forward/backward) and Z (vertical) components
+        # Extract Z (vertical) components
         f_fl_push = f_fl_local[:, 2]
         f_fr_push = f_fr_local[:, 2]
 
@@ -1724,3 +1737,25 @@ class GO2SparkBiped(BaseTask):
         # Penalty: nonzero only when cmd_mag > deadzone AND both feet in contact
         cost = both * cmd_excess
         return cost
+
+    def _neg_reward_trot_in_place(self):
+        """Penalize foot motion while stationary and upright."""
+        # Only active when commanded to stand still
+        active = self.is_stationary
+        if not torch.any(active):
+            return torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+
+        # Negative reward
+        thigh_joint_indices_rear = [7, 10]
+        # Penalize angles of thigh != 2.0
+        target = 2.0
+        diff = self.dof_pos[active][:, thigh_joint_indices_rear] - target
+        dof_pos_error = torch.sum(torch.square(diff), dim=-1)
+
+        gate = self._biped_orientation_gate()[active]
+        reward_active = torch.lerp(torch.zeros_like(dof_pos_error), dof_pos_error, gate)
+        reward = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+        reward[active] = reward_active
+
+        gate = self._biped_orientation_gate()
+        return torch.lerp(torch.zeros_like(reward), reward, gate)
