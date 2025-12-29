@@ -52,6 +52,10 @@ from legged_gym.envs.go2.go2_ts.go2_ts_config import Go2TSCfg, Go2TSCfgPPO
 from legged_gym.envs.go2.go2_spark_biped.go2_spark_biped import GO2SparkBiped
 from legged_gym.envs.go2.go2_spark_biped.go2_spark_biped_config import GO2SparkBipedCfg, GO2SparkBipedCfgPPO
 
+# go2_mimic
+from legged_gym.envs.go2.go2_mimic.go2_mimic import GO2Mimic
+from legged_gym.envs.go2.go2_mimic.go2_mimic_config import GO2MimicCfg, GO2MimicCfgPPO
+
 from legged_gym.utils.task_registry import task_registry
 
 task_registry.register( "go2", GO2, GO2Cfg(), GO2CfgPPO())
@@ -60,4 +64,5 @@ task_registry.register( "go2_wtw", GO2WTW, GO2WTWCfg(), GO2WTWCfgPPO())
 task_registry.register( "go2_sysid", GO2SysID, GO2SysIDCfg(), GO2CfgPPO())
 task_registry.register( "go2_ts", Go2TS, Go2TSCfg(), Go2TSCfgPPO())
 task_registry.register( "go2_spark_biped", GO2SparkBiped, GO2SparkBipedCfg(), GO2SparkBipedCfgPPO())
+task_registry.register( "go2_mimic", GO2Mimic, GO2MimicCfg(), GO2MimicCfgPPO())
 task_registry.register( "bipedal_walker", BipedalWalker, BipedalWalkerCfg(), BipedalWalkerCfgPPO())

@@ -878,7 +878,6 @@ Stephen Brawner (brawner@gmail.com)
     <collision>
       <origin rpy="0 0 0" xyz="0.02 0 0" />
       <geometry>
-        <!-- <sphere radius="0.022" /> -->
         <box size="0.10 0.10 0.052" />
       </geometry>
     </collision>
@@ -1143,7 +1142,6 @@ Stephen Brawner (brawner@gmail.com)
     <collision>
       <origin rpy="0 0 0" xyz="0.02 0 0" />
       <geometry>
-        <!-- <sphere radius="0.022" /> -->
         <box size="0.10 0.10 0.052" />
       </geometry>
     </collision>
