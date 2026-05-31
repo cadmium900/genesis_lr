@@ -64,10 +64,12 @@ def _determine_device_index(local_rank: int) -> int:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is None:
         return local_rank
-    visible = visible.strip()
-    if visible == str(local_rank):
+    gpus = [g.strip() for g in visible.strip().split(",") if g.strip()]
+    if len(gpus) == 1:
         return 0
-    return local_rank
+    if local_rank < len(gpus):
+        return local_rank
+    return 0
 
 
 def get_context() -> DistributedContext:

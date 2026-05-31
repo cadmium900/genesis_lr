@@ -10,9 +10,9 @@ class GO2MimicCfg(BaseConfig):
         # observation history
         frame_stack = 5   # policy frame stack
         c_frame_stack = 5  # critic frame stack
-        num_single_obs = 62
+        num_single_obs = 70
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 99
+        single_num_privileged_obs = 107
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
@@ -98,6 +98,13 @@ class GO2MimicCfg(BaseConfig):
     class asset:
         name = "go2" # name of the robot
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2_biped/urdf/go2.urdf'
+        fbx_file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2_biped/animations/go2_mimic.fbx'
+        anim_height_scale = 1.0
+        anim_stack = [
+            'robot|StandUp',
+            'robot|Idle',
+            'robot|WalkForward'
+        ]
         dof_names = [        # specify the sequence of actions
             'FR_hip_joint',
             'FR_thigh_joint',
@@ -145,71 +152,38 @@ class GO2MimicCfg(BaseConfig):
 
     class rewards:
         soft_dof_pos_limit = 0.9
-        soft_dof_vel_limit = 1.
-        foot_height_offset = 0.022 # height of the foot coordinate origin above ground [m]
-        euler_tracking_sigma = 0.1745
-        roll_tracking_sigma = 0.08
         only_positive_rewards = True
-        tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
         soft_torque_limit = 1.
-        foot_clearance_tracking_sigma = 0.1
-        heavy_foot_sigma = 0.1
+        anim_dof_k = 10.0
+        anim_base_k = 10.0
         base_height_tracking_sigma = 0.25
-        front_arm_angle_sigma = 0.5
-        thigh_angle_sigma = 0.5
-        calf_angle_sigma = 0.5
-        arm_angle_sigma = 0.5
-        arm_angle_k = 10.2
-        feet_under_base_sigma = 0.08
-        feet_under_base_height_thresh = 0.5
-        hind_spread_sigma = 0.1
-        foot_orientation_sigma = 0.1
+        anim_termination_phase = 0.9
+        anim_termination_orient_rad = 0.7
+        anim_termination_height = 0.20
+        anim_termination_dof = 0.6
         biped_shaping_pitch_window = 0.90
-        biped_shaping_com_weight = 0.4
-        clock_contact_force_threshold = 1.0
-        clock_contact_force_scale = 0.5
-        clock_phase_weight_power = 1.0
-        clock_phase_weight_floor = 0.0
+        euler_tracking_sigma = 0.1745
+        tracking_sigma = 0.20 # tracking reward = exp(-error^2/sigma)
 
 
         class scales:
-            front_feet_off = 0.35
-            front_feet_on_ground_push = 0.0025
-            hind_alternation = 0.82
-            com_over_support = 0.5
-            tracking_lin_vel = 1.5
+            anim_dof_pos = 1.5
+            anim_base_orient = 2.0
+            anim_base_height = 1.0
+            tracking_lin_vel = 1.1
             tracking_ang_vel = 0.85
-            orientation = 1.5
-            base_height_target = 0.6
-            hind_foot_clearance = 0.82
-            arm_angles = 0.5
-            feet_under_base = 0.45
-            walk_side_bobbing = 0.8
-            clock_contact_consistency = 0.4
 
-            hind_spread_contact = -1.5
-            static_walk = -1.9
-            foot_orientation = -0.3
-            trot_in_place = -3.0
-
-
-            #heavy_foot = -0.3
             dof_pos_limits = -10.0
             collision = -1.0
             dof_vel = -5e-4
             dof_acc = -2e-7
             action_rate = -0.003
             action_smoothness = -0.03
-            hip_pos = -0.5
-            pitch_rate = -10.0
             termination = -0.0
 
         class behavior_params_range:
             resampling_time = 6.0
             gait_period_range = [0.50, 1.5] # [0.30, 0.60]
-            foot_clearance_target_range = [0.26, 0.29]
-            base_height_target_range = [0.50, 0.65]
-            pitch_target_range = [1.0, 1.0]
 
     class normalization:
         class obs_scales:
@@ -275,12 +249,15 @@ class GO2MimicCfgPPO():
         run_name = 'mimic'
         experiment_name = 'go2_mimic'
         save_interval = 500
-        load_run = "Dec17_20-51-51_mimic"
+        load_run = "Jan10_15-54-28_mimic"
         checkpoint = -1
         max_iterations = 5000
         num_steps_per_env = 16 #32
         policy_class_name = 'ActorCritic'
+        sync_save = True
+        check_obs_shapes = True
+        check_obs_shapes_every = 1
         algorithm_class_name = 'PPO'
         # load and resume
         resume = False
-        resume_path = None # updated from load_run and chkpt
+        resume_path = "Jan10_15-54-28_mimic" # updated from load_run and chkpt

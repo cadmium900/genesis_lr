@@ -8,9 +8,16 @@ def _configure_cuda_scope():
     world_size = os.environ.get("WORLD_SIZE")
     if local_rank is None or world_size is None:
         return
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        return
-    os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
+    local_rank = int(local_rank)
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd:
+        gpus = [g.strip() for g in cvd.split(",")]
+        if local_rank < len(gpus):
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpus[local_rank]
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpus[0]
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
 
 
 def _mirror_allocator_env():

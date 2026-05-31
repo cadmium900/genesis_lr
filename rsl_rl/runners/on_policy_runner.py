@@ -87,6 +87,9 @@ class OnPolicyRunner:
         self._camera_recording = False
         self._last_camera_frame_time = 0.0
         self._last_camera_target = None
+        self.check_obs_shapes = bool(self.cfg.get("check_obs_shapes", False))
+        self.check_obs_shapes_every = int(self.cfg.get("check_obs_shapes_every", 0))
+        self.sync_save = bool(self.cfg.get("sync_save", False))
         if self.env.num_privileged_obs is not None:
             num_critic_obs = self.env.num_privileged_obs
         else:
@@ -139,6 +142,36 @@ class OnPolicyRunner:
 
         _, _ = self.env.reset()
 
+    def _assert_obs_shapes(self, obs, critic_obs):
+        if obs is None:
+            raise ValueError("obs is None; expected a tensor.")
+        if obs.shape[-1] != self.env.num_obs:
+            raise ValueError(
+                f"obs dim mismatch: got {obs.shape[-1]}, expected {self.env.num_obs}."
+            )
+        if self.env.num_privileged_obs is not None:
+            if critic_obs is None:
+                raise ValueError(
+                    "privileged obs missing; env.num_privileged_obs is set."
+                )
+            if critic_obs.shape[-1] != self.env.num_privileged_obs:
+                raise ValueError(
+                    "critic obs dim mismatch: got "
+                    f"{critic_obs.shape[-1]}, expected {self.env.num_privileged_obs}."
+                )
+        elif critic_obs is not None and critic_obs.shape[-1] != self.env.num_obs:
+            raise ValueError(
+                "critic obs dim mismatch: got "
+                f"{critic_obs.shape[-1]}, expected {self.env.num_obs}."
+            )
+
+    def _should_check_obs_shapes(self, step_idx):
+        if not self.check_obs_shapes:
+            return False
+        if self.check_obs_shapes_every <= 0:
+            return step_idx == 0
+        return (step_idx % self.check_obs_shapes_every) == 0
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         try:
             # initialize writer
@@ -156,6 +189,8 @@ class OnPolicyRunner:
             privileged_obs = self.env.get_privileged_observations()
             critic_obs = privileged_obs if privileged_obs is not None else obs
             obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
+            if self.check_obs_shapes:
+                self._assert_obs_shapes(obs, critic_obs)
             self.alg.actor_critic.train() # switch to train mode (for dropout for example)
 
             ep_infos = []
@@ -171,6 +206,8 @@ class OnPolicyRunner:
                 with torch.inference_mode():
                     for i in range(self.num_steps_per_env):
 
+                        if self._should_check_obs_shapes(i):
+                            self._assert_obs_shapes(obs, critic_obs)
                         # Check for Nan
                         if not torch.isfinite(obs).all():
                             print("Bad OBS, fixing...")
@@ -186,6 +223,8 @@ class OnPolicyRunner:
                         obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
                         critic_obs = privileged_obs if privileged_obs is not None else obs
                         obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                        if self._should_check_obs_shapes(i):
+                            self._assert_obs_shapes(obs, critic_obs)
                         self.alg.process_env_step(rewards, dones, infos)
                         self._maybe_render_camera_frame()
 
@@ -287,9 +326,13 @@ class OnPolicyRunner:
                 if rq_record_stop:
                     self._sync_camera_recording(action="stop")
 
-                if self.should_write_logs and self.log_dir is not None:
-                    if rq_save or rq_quit or (it % self.save_interval == 0):
-                        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+                do_save = rq_save or rq_quit or (it % self.save_interval == 0)
+                if self.is_distributed and self.sync_save and do_save:
+                    dist_utils.barrier()
+                if self.should_write_logs and self.log_dir is not None and do_save:
+                    self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+                if self.is_distributed and self.sync_save and do_save:
+                    dist_utils.barrier()
                 ep_infos.clear()
 
                 if rq_quit:

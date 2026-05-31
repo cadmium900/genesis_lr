@@ -4,7 +4,7 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 class GO2WTWCfg(LeggedRobotCfg):
 
     class env(LeggedRobotCfg.env):
-        num_envs = 4096
+        num_envs = 21500
         env_spacing = 1.0
         num_actions = 12
         # observation history
@@ -119,8 +119,8 @@ class GO2WTWCfg(LeggedRobotCfg):
         class behavior_params_range:
             resampling_time = 6.0
             gait_period_range = [0.40, 0.55]
-            foot_clearance_target_range = [0.06, 0.12]
-            base_height_target_range = [0.20, 0.32]
+            foot_clearance_target_range = [0.01, 0.25]
+            base_height_target_range = [0.10, 0.42]
             pitch_target_range = [-0.3, 0.3]
 
     class commands(LeggedRobotCfg.commands):
@@ -144,10 +144,10 @@ class GO2WTWCfg(LeggedRobotCfg):
         randomize_base_mass = enable
         added_mass_range = [-1., 1.]
         push_robots = enable
-        push_interval_s = 15
-        max_push_vel_xy = 1.
+        push_interval_s = 8
+        max_push_vel_xy = 1.5
         randomize_com_displacement = enable
-        com_displacement_range = [-0.03, 0.03]
+        com_displacement_range = [-0.07, 0.07]
         randomize_ctrl_delay = False
         ctrl_delay_step_range = [0, 1]
         randomize_pd_gain = enable
@@ -172,6 +172,13 @@ class GO2WTWCfg(LeggedRobotCfg):
             ang_vel = 0.2
             gravity = 0.05
             height_measurements = 0.1
+
+    class viewer(LeggedRobotCfg.viewer):
+        ref_env = 0
+        pos = [2, 2, 2]
+        lookat = [0.0, 0.0, 1.0]
+        rendered_envs_idx = [i for i in range(15)]
+        add_camera = True
 
 class GO2WTWCfgPPO(LeggedRobotCfgPPO):
     seed = -1

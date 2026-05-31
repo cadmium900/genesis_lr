@@ -8,6 +8,7 @@ from scipy.stats import vonmises
 import torch
 from torch import Tensor
 from typing import Tuple, Dict
+import math
 
 from genesis.engine.solvers.rigid.rigid_solver_decomp import RigidSolver
 from genesis.engine.solvers.avatar_solver import AvatarSolver
@@ -24,10 +25,174 @@ from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.gs_utils import *
 from legged_gym.utils.terrain import Terrain
 from .go2_mimic_config import GO2MimicCfg
+from . import anim_utils
+
+class FbxScene:
+    def __init__(self, urdf_file, fbx_file):
+        self.urdf_file = urdf_file
+        self.fbx_file = fbx_file
+        self.manager, self.scene = anim_utils._load_scene(fbx_file)
+        self.stacks = anim_utils._get_anim_stacks(self.scene)
+        self.bones = anim_utils._collect_skeleton_nodes(self.scene)
+        self.bones = anim_utils._resolve_bones(self.bones, None)
+        self.stacks = anim_utils._resolve_stacks(self.stacks, None)
+        if not self.stacks:
+            print("No animation stacks found.", file=sys.stderr)
+            return
+
+        self.fps = anim_utils._get_fps(self.scene, None)
+        if self.fps <= 0:
+            print("Invalid FPS.", file=sys.stderr)
+            return
+        self.unit_scale = anim_utils._get_scene_unit_scale(self.scene)
+
+        urdf_info = {}
+        bone_limit_map = {}
+        bone_rpy_map = {}
+        name_map = {node.GetName(): node for node in self.bones}
+        urdf_info = anim_utils._parse_urdf_joint_info(self.urdf_file)
+        normalized = {anim_utils._normalize_name(name): name for name in name_map.keys()}
+        for key, info in urdf_info.items():
+            axis, lower, upper, rpy = info
+            node = name_map.get(key)
+            if node is None:
+                node_name = normalized.get(anim_utils._normalize_name(key))
+                if node_name:
+                    node = name_map[node_name]
+            if node is None:
+                continue
+            bone_limit_map[node.GetName()] = (axis, lower, upper)
+            bone_rpy_map[node.GetName()] = rpy
+
+        self.calibration_map: Dict[
+            str, Tuple[int, float, float, float, float, str, np.ndarray, np.ndarray]
+        ] = {}
+        self.calibration_stack = None
+        self.base_node = None
+        self.base_rest_quat = None
+        if bone_limit_map:
+            self.calibration_stack = anim_utils._find_calibration_stack(self.stacks)
+            if self.calibration_stack is None:
+                print("Warning: no calibration stack found; skipping uncalibrated bones.")
+            else:
+                self.calibration_map = anim_utils._build_calibration_map(
+                    self.scene,
+                    self.calibration_stack,
+                    self.bones,
+                    bone_limit_map,
+                    None,
+                    self.fps
+                )
+        for node in self.bones:
+            name = node.GetName()
+            if name == "Base" or name.lower() == "base":
+                self.base_node = node
+                break
+        if self.base_node is not None and self.calibration_stack is not None:
+            self.scene.SetCurrentAnimationStack(self.calibration_stack)
+            span = self.calibration_stack.GetLocalTimeSpan()
+            start_sec = span.GetStart().GetSecondDouble()
+            t = anim_utils._require_fbx().FbxTime()
+            t.SetSecondDouble(float(start_sec))
+            self.base_rest_quat = anim_utils._local_quat_from_global(self.base_node, t)
+
+class Animator:
+    def __init__(self, _fbx_scene):
+        self.fbx_scene = _fbx_scene
+        self.cur_anim = None
+        self.cur_stack = None
+        self.anim_span = None
+        self.anim_start_sec = None
+        self.anim_end_sec = None
+        self.anim_total_frames = None
+        self.anim_frame = 0
+        self.fbx_time = anim_utils._require_fbx().FbxTime()
+
+    def get_current_frame(self):
+        return self.anim_frame
+
+    def get_current_time(self):
+        return self.anim_start_sec + self.anim_frame / self.fbx_scene.fps
+
+    def set_current_frame(self, idx):
+        if self.anim_total_frames is None:
+            return
+        idx = int(idx)
+        max_frame = max(self.anim_total_frames - 1, 0)
+        if idx < 0:
+            idx = 0
+        elif idx > max_frame:
+            idx = max_frame
+        self.anim_frame = idx
+        time_sec = self.anim_start_sec + self.anim_frame / self.fbx_scene.fps
+        self.fbx_time.SetSecondDouble(float(time_sec))
+
+    def set_current_time(self, time_sec):
+        if self.anim_total_frames is None or self.anim_start_sec is None or self.anim_end_sec is None:
+            return
+        if self.anim_end_sec <= self.anim_start_sec:
+            self.anim_frame = 0
+            self.fbx_time.SetSecondDouble(float(self.anim_start_sec))
+            return
+        if time_sec < self.anim_start_sec:
+            time_sec = self.anim_start_sec
+        elif time_sec > self.anim_end_sec:
+            time_sec = self.anim_end_sec
+        self.anim_frame = int(round((time_sec - self.anim_start_sec) * self.fbx_scene.fps))
+        max_frame = max(self.anim_total_frames - 1, 0)
+        if self.anim_frame > max_frame:
+            self.anim_frame = max_frame
+        elif self.anim_frame < 0:
+            self.anim_frame = 0
+        time_sec = self.anim_start_sec + self.anim_frame / self.fbx_scene.fps
+        self.fbx_time.SetSecondDouble(float(time_sec))
+
+    def activate(self):
+        self.fbx_scene.scene.SetCurrentAnimationStack(self.cur_stack)
+
+    def set_animation(self, anim_name):
+        self.cur_anim = anim_name
+        self.cur_stack = None
+        for stack in self.fbx_scene.stacks:
+            if anim_name in stack.GetName():
+                self.cur_stack = stack
+                break
+
+        if self.cur_stack is None:
+            return False
+
+        self.activate()
+        self.anim_span = self.cur_stack.GetLocalTimeSpan()
+        self.anim_start_sec = self.anim_span.GetStart().GetSecondDouble()
+        self.anim_end_sec = self.anim_span.GetStop().GetSecondDouble()
+        self.anim_total_frames = int(
+            math.floor((self.anim_end_sec - self.anim_start_sec) * self.fbx_scene.fps + 0.5)
+        ) + 1
+        if self.anim_total_frames <= 0:
+            return False
+
+        self.anim_frame = 0
+        self.fbx_time.SetSecondDouble(float(self.anim_start_sec))
+        return True
+
+    def get_animation_angles(self):
+        self.activate()
+        urdf_angles, axis_angles, _local_quats = anim_utils._compute_urdf_joint_angles(
+                    self.fbx_scene.bones,
+                    self.fbx_time,
+                    self.fbx_scene.calibration_map,
+                    None,
+                    None
+                )
+        return urdf_angles, axis_angles, _local_quats
+
 
 class GO2Mimic(BaseTask):
     def __init__(self, cfg: GO2MimicCfg, sim_device, headless):
         start = time.time()
+        # Current animation
+        self.animator = None
+
         self.cfg = cfg
         self.last_record_time = time.time()
         self.video_capturing = False
@@ -244,16 +409,69 @@ class GO2Mimic(BaseTask):
         # compute observations, rewards, resets, ...
         self.check_base_pos_out_of_bound()
         self.check_termination()
+        self._update_anim_targets()
         self.compute_reward()
         # Periodic Reward Framework phi cycle
         # step after computing reward but before resetting the env
         self.gait_time += self.dt
 
+
+        if self.anim_base_quat_seq is not None:
+            self.target_quat = normalize(self.anim_base_quat_targets)
+            self.target_fwd = gs_quat_apply(self.target_quat, self.forward_vec)
+            self.target_pitch = torch.atan2(
+                self.target_fwd[:, 2],
+                torch.norm(self.target_fwd[:, :2], dim=1),
+            ).unsqueeze(1)
+        else:
+            self.target_quat = torch.zeros(
+                self.num_envs,
+                4,
+                dtype=gs.tc_float,
+                device=self.device,
+            )
+            self.target_pitch = torch.zeros(
+                self.num_envs,
+                1,
+                dtype=gs.tc_float,
+                device=self.device,
+            )
+        if self.anim_base_height_seq is not None:
+            self.anim_base_height = self.anim_base_height_targets.unsqueeze(1)
+        else:
+            self.anim_base_height = torch.zeros(
+                self.num_envs,
+                1,
+                dtype=gs.tc_float,
+                device=self.device,
+            )
+        if self.anim_dof_seq is not None:
+            self.anim_dof_pos = (self.anim_dof_targets - self.default_dof_pos) * self.obs_scales.dof_pos
+        else:
+            self.anim_dof_pos = torch.zeros(
+                self.num_envs,
+                self.num_actions,
+                dtype=gs.tc_float,
+                device=self.device,
+            )
+
+
         # +self.dt/2 in case of float precision errors
         is_over_limit = (self.gait_time >= (self.gait_period - self.dt / 2))
-        over_limit_indices = is_over_limit.nonzero(as_tuple=False).flatten()
-        self.gait_time[over_limit_indices] = 0.0
+        if self.anim_frame_counts is not None and self.anim_frame_counts.shape[0] > 1:
+            walking = torch.norm(self.commands[:, :2], dim=1) > 0.0
+            walking_mask = walking.unsqueeze(1)
+            wrapped = torch.remainder(self.gait_time, self.gait_period)
+            clamped = torch.where(is_over_limit, self.gait_period, self.gait_time)
+            self.gait_time = torch.where(walking_mask, wrapped, clamped)
+        else:
+            self.gait_time = torch.where(is_over_limit, self.gait_period, self.gait_time)
         self.phi = self.gait_time / self.gait_period
+        # print(
+        #     f"pid {os.getpid()} step {self.common_step_counter} "
+        #     f"episode_len {int(self.episode_length_buf[0].item())} "
+        #     f"gait_time {self.gait_time[0,0]} self.dt {self.dt} self_phi {self.phi[0]}"
+        # )
 
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         if self.num_build_envs > 0:
@@ -427,10 +645,61 @@ class GO2Mimic(BaseTask):
         proj_grav_over_limit = self.base_axis_fwd[:, 2] < self.termination_z
         self.reset_buf |= proj_grav_over_limit
 
+        self._check_anim_termination()
+
         # After a while if robot not standing enough upright, reset
         # elapsed_limit = self.episode_length_buf > self.max_episode_length * 0.25
         # upright_fail = torch.logical_and(elapsed_limit, self.base_axis_fwd[:, 2] < 0.5)
         # self.reset_buf |= upright_fail
+
+    def _check_anim_termination(self):
+        if self.anim_frame_counts is None or self.anim_frame_count <= 0:
+            return
+        if self.gait_period.numel() == 0:
+            return
+        phase = (self.gait_time / self.gait_period).squeeze(-1)
+        phase = torch.clamp(phase, 0.0, 1.0)
+        active = phase >= self.cfg.rewards.anim_termination_phase
+        if not torch.any(active):
+            return
+
+        anim_idx = torch.clamp(self.anim_index, 0, self.anim_frame_counts.shape[0] - 1)
+        frame_counts = self.anim_frame_counts[anim_idx]
+        max_frame = torch.clamp(frame_counts - 1, min=0)
+        frame_float = phase * max_frame.to(phase.dtype)
+        frame_idx = torch.clamp((frame_float + 0.5).to(torch.long), min=0)
+        frame_idx = torch.minimum(frame_idx, max_frame.to(torch.long))
+
+        term = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # orient_thresh = self.cfg.rewards.anim_termination_orient_rad
+        # if self.anim_base_quat_seq is not None and orient_thresh > 0.0:
+        #     base_init = self.base_init_quat.reshape(1, -1).repeat(self.num_envs, 1)
+        #     base_rel = gs_quat_mul(self.base_quat, gs_inv_quat(base_init))
+        #     base_rel = normalize(base_rel)
+        #     target = normalize(self.anim_base_quat_seq[anim_idx, frame_idx])
+        #     q_err = gs_quat_mul(base_rel, gs_inv_quat(target))
+        #     w = torch.clamp(torch.abs(q_err[:, 0]), max=1.0)
+        #     angle = 2.0 * torch.acos(w)
+        #     term |= angle > orient_thresh
+
+        height_thresh = self.cfg.rewards.anim_termination_height
+        if self.anim_base_height_seq is not None and height_thresh > 0.0:
+            if self.feet_pos.numel() > 0:
+                min_foot_z = self.feet_pos[:, :, 2].min(dim=1).values
+            else:
+                min_foot_z = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+            cur_h = self.base_pos[:, 2] - min_foot_z
+            target_h = self.anim_base_height_seq[anim_idx, frame_idx]
+            term |= torch.abs(cur_h - target_h) > height_thresh
+
+        # dof_thresh = self.cfg.rewards.anim_termination_dof
+        # if self.anim_dof_seq is not None and dof_thresh > 0.0:
+        #     target_dof = self.anim_dof_seq[anim_idx, frame_idx]
+        #     dof_err = torch.abs(self._angle_diff(self.dof_pos, target_dof)).mean(dim=-1)
+        #     term |= dof_err > dof_thresh
+
+        self.reset_buf |= term & active
 
 
 
@@ -483,11 +752,11 @@ class GO2Mimic(BaseTask):
             self.actions,                                  # a_{t-1} 12 [36..47]
             self.clock_input,                              # clock   2 [48..49]
             self.gait_period,                              # gait period 1 [50]
-            self.base_height_target,                       # base height target 1 [51]
-            self.foot_clearance_target,                    # foot clearance target 1 [52]
-            self.fixed_pitch_target,                       # pitch target 1 [53]
-            self.arm_left_target[:, :4],                  # 4 [54..57]
-            self.arm_right_target[:, :4],                 # 4 [58..61]
+            self.anim_index.unsqueeze(1).to(self.commands_scale.dtype),  # anim index 1 [51]
+            self.target_quat,                                   # anim target quat 4 [52..55]
+            self.target_pitch,                                  # anim target pitch 1 [56]
+            self.anim_base_height,                              # anim base height target 1 [57]
+            self.anim_dof_pos,                                  # anim dof targets 12 [58..69]
         ), dim=-1)
 
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -508,11 +777,11 @@ class GO2Mimic(BaseTask):
                 self.actions,                                  # a_{t-1} 12
                 self.clock_input,                              # clock   2
                 self.gait_period,                              # gait period 1
-                self.base_height_target,                       # base height target 1
-                self.foot_clearance_target,                    # foot clearance target 1
-                self.fixed_pitch_target,                             # pitch target 1
-                self.arm_left_target[:, :4],                          # 4
-                self.arm_right_target[:, :4],                         # 4
+                self.anim_index.unsqueeze(1).to(self.commands_scale.dtype),  # anim index 1
+                self.target_quat,                                   # anim target quat 4
+                self.target_pitch,                                  # anim target pitch 1
+                self.anim_base_height,                              # anim base height target 1
+                self.anim_dof_pos,                                  # anim dof targets 12
                 # domain randomization parameters
                 self._rand_push_vels[:, :2],                   # 2
                 self._added_base_mass,                         # 1
@@ -584,6 +853,14 @@ class GO2Mimic(BaseTask):
         self.gait_time[env_ids] = 0.0
         self.phi[env_ids] = 0.0
         self.clock_input[env_ids] = 0.0
+        if self.anim_dof_seq is not None and self.anim_frame_counts is not None:
+            anim_idx = torch.clamp(self.anim_index[env_ids], 0, self.anim_frame_counts.shape[0] - 1)
+            self.anim_frame_idx[env_ids] = 0
+            self.anim_dof_targets[env_ids] = self.anim_dof_seq[anim_idx, 0]
+            if self.anim_base_quat_seq is not None:
+                self.anim_base_quat_targets[env_ids] = self.anim_base_quat_seq[anim_idx, 0]
+            if self.anim_base_height_seq is not None:
+                self.anim_base_height_targets[env_ids] = self.anim_base_height_seq[anim_idx, 0]
 
         # fill extras
         self.extras["episode"] = {}
@@ -606,8 +883,6 @@ class GO2Mimic(BaseTask):
         # Behavior parameters
         self.extras["episode"]["gait_period"] = torch.mean(self.gait_period[:])
         self.extras["episode"]["pitch_target"] = torch.mean(self.pitch_target[:])
-        self.extras["episode"]["foot_clearance_target"] = torch.mean(self.foot_clearance_target[:])
-        self.extras["episode"]["base_height_target"] = torch.mean(self.base_height_target[:])
 
         # reset action queue and delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -775,61 +1050,26 @@ class GO2Mimic(BaseTask):
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
-        if torch.mean(self.episode_sums["orientation"][env_ids]) / \
-            self.max_episode_length > 0.5 * self.reward_scales["orientation"]:
+        if "anim_base_orient" not in self.episode_sums:
+            return
+        if torch.mean(self.episode_sums["anim_base_orient"][env_ids]) / \
+            self.max_episode_length > 0.5 * self.reward_scales["anim_base_orient"]:
             self.commands[env_ids, 0] = gs_rand_float(*self.cfg.commands.ranges.lin_vel_x, (len(env_ids),), self.device)
             self.commands[env_ids, 1] = gs_rand_float(*self.cfg.commands.ranges.lin_vel_y, (len(env_ids),), self.device)
             self.commands[env_ids, 2] = gs_rand_float(*self.cfg.commands.ranges.ang_vel_yaw, (len(env_ids),), self.device)
 
-            self.pitch_target[env_ids, :] = self.fixed_pitch_target[env_ids, :]
-
             # set small commands to zero
             #self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > self.cfg.commands.min_normal).unsqueeze(1)
 
-            rand_left = torch.rand((len(env_ids), 3), device=self.device)
-            rand_right = torch.rand((len(env_ids), 3), device=self.device)
-            self.arm_left_target[env_ids, :3] = (
-                self.dof_pos_limits[self.dof_arm_left_idx, 0]
-                + (self.dof_pos_limits[self.dof_arm_left_idx, 1] - self.dof_pos_limits[self.dof_arm_left_idx, 0]) * rand_left
-            )
-            self.arm_right_target[env_ids, :3] = (
-                self.dof_pos_limits[self.dof_arm_right_idx, 0]
-                + (self.dof_pos_limits[self.dof_arm_right_idx, 1] - self.dof_pos_limits[self.dof_arm_right_idx, 0]) * rand_right
-            )
-
         else:
             self.commands[env_ids, :3] = 0.0
-            self.pitch_target[env_ids, :] = self.fixed_pitch_target[env_ids, :]
-
-            self.arm_left_target[env_ids, :3] = self.dof_pos_limits[self.dof_arm_left_idx, 0] + (self.dof_pos_limits[self.dof_arm_left_idx, 1] - self.dof_pos_limits[self.dof_arm_left_idx, 0]) * 0.5
-            self.arm_right_target[env_ids, :3] = self.dof_pos_limits[self.dof_arm_right_idx, 0] + (self.dof_pos_limits[self.dof_arm_right_idx, 1] - self.dof_pos_limits[self.dof_arm_right_idx, 0]) * 0.5
 
 
     def _resample_behavior_params(self, env_ids):
         if len(env_ids) == 0:
             return
 
-        if torch.mean(self.episode_sums["base_height_target"][env_ids]) / \
-            self.max_episode_length > 0.9 * self.reward_scales["base_height_target"]:
-            self.base_height_target[env_ids, :] = gs_rand_float(
-                self.cfg.rewards.behavior_params_range.base_height_target_range[0],
-                self.cfg.rewards.behavior_params_range.base_height_target_range[1],
-                (len(env_ids), 1), device=self.device
-            )
-
-            self.gait_period[env_ids, :] = gs_rand_float(
-                self.cfg.rewards.behavior_params_range.gait_period_range[0],
-                self.cfg.rewards.behavior_params_range.gait_period_range[1],
-                (len(env_ids), 1), device=self.device
-            )
-
-        if torch.mean(self.episode_sums["hind_foot_clearance"][env_ids]) / \
-            self.max_episode_length > 0.75 * self.reward_scales["hind_foot_clearance"]:
-            self.foot_clearance_target[env_ids, :] = gs_rand_float(
-                self.cfg.rewards.behavior_params_range.foot_clearance_target_range[0],
-                self.cfg.rewards.behavior_params_range.foot_clearance_target_range[1],
-                (len(env_ids), 1), device=self.device
-            )
+        self._sync_gait_period(env_ids)
 
     def _push_robots(self):
         """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity.
@@ -876,6 +1116,8 @@ class GO2Mimic(BaseTask):
         Args:
             env_ids (List[int]): ids of environments being reset
         """
+        if "tracking_lin_vel" not in self.episode_sums:
+            return
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > \
                 self.cfg.commands.curriculum_threshold * self.reward_scales["tracking_lin_vel"]:
@@ -889,6 +1131,188 @@ class GO2Mimic(BaseTask):
         phase = 2 * torch.pi * self.phi
         self.clock_input[:, 0] = torch.sin(phase).squeeze(-1)
         self.clock_input[:, 1] = torch.cos(phase).squeeze(-1)
+
+    def _build_anim_cache(self):
+        """Precompute URDF joint angles for every animation stack."""
+        dof_names = self.cfg.asset.dof_names
+        anim_names = list(self.cfg.asset.anim_stack)
+        if not anim_names:
+            raise RuntimeError("cfg.asset.anim_stack is empty.")
+
+        seqs = []
+        base_seqs = []
+        base_height_seqs = []
+        frame_counts = []
+        resolved_names = []
+        base_node = self.fbx_scene.base_node
+        if base_node is None:
+            raise RuntimeError("Base bone not found in FBX skeleton.")
+        foot_keys = [name.lower() for name in self.cfg.asset.foot_name]
+        foot_nodes = [
+            node
+            for node in self.fbx_scene.bones
+            if any(key in node.GetName().lower() for key in foot_keys)
+        ]
+        height_nodes = foot_nodes if foot_nodes else list(self.fbx_scene.bones)
+        if not height_nodes:
+            height_nodes = [base_node]
+        if not foot_nodes:
+            print("Warning: no FBX foot bones found; base height uses min Z across all bones.")
+        base_rest_quat = self.fbx_scene.base_rest_quat
+        if base_rest_quat is None:
+            base_rest_quat = anim_utils._euler_deg_to_quat_xyz(base_node.LclRotation.Get())
+
+        for anim_name in anim_names:
+            if not self.animator.set_animation(anim_name):
+                print("Animation stack list")
+                for stack in self.fbx_scene.stacks:
+                    print(f"-> {stack.GetName()}")
+                raise RuntimeError(f"Animation stack not found: {anim_name}")
+            stack_name = self.animator.cur_stack.GetName()
+            frames = self.animator.anim_total_frames or 0
+            if frames <= 0:
+                raise RuntimeError(f"Invalid frame count for stack: {stack_name}")
+            seq = np.zeros((frames, len(dof_names)), dtype=np.float32)
+            base_seq = np.zeros((frames, 4), dtype=np.float32)
+            base_height_axis_seq = np.zeros((3, frames), dtype=np.float32)
+            prev_axis_angles = {}
+            missing = set()
+            for frame_idx in range(frames):
+                time_sec = self.animator.anim_start_sec + frame_idx / self.fbx_scene.fps
+                self.animator.set_current_time(time_sec)
+                urdf_angles, _, _ = anim_utils._compute_urdf_joint_angles(
+                    self.fbx_scene.bones,
+                    self.animator.fbx_time,
+                    self.fbx_scene.calibration_map,
+                    None,
+                    prev_axis_angles,
+                )
+                for i, name in enumerate(dof_names):
+                    angle = urdf_angles.get(name)
+                    if angle is None:
+                        missing.add(name)
+                        angle = 0.0
+                    seq[frame_idx, i] = angle
+                base_local = anim_utils._local_quat_from_global(base_node, self.animator.fbx_time)
+                base_rel = anim_utils._quat_mul(base_local, anim_utils._quat_inv(base_rest_quat))
+                base_seq[frame_idx] = np.array(
+                    [base_rel[3], base_rel[0], base_rel[1], base_rel[2]], dtype=np.float32
+                )
+                base_global = anim_utils._global_pos_from_node(base_node, self.animator.fbx_time)
+                min_vec = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+                for node in height_nodes:
+                    pos = anim_utils._global_pos_from_node(node, self.animator.fbx_time)
+                    min_vec = np.minimum(min_vec, pos)
+                base_height_axis_seq[:, frame_idx] = base_global - min_vec
+            if missing:
+                raise ValueError(f"Missing FBX joints for DOFs: {sorted(missing)}")
+            axis_idx = int(np.argmax(base_height_axis_seq.mean(axis=1)))
+            if axis_idx != 2:
+                axis_name = ["x", "y", "z"][axis_idx]
+                print(f"Info: using FBX {axis_name}-axis for base height in stack {stack_name}.")
+            base_height_seq = base_height_axis_seq[axis_idx]
+            height_scale = getattr(self.fbx_scene, "unit_scale", 1.0)
+            height_scale *= getattr(self.cfg.asset, "anim_height_scale", 1.0)
+            base_height_seq = base_height_seq * float(height_scale)
+            seqs.append(seq)
+            base_seqs.append(base_seq)
+            base_height_seqs.append(base_height_seq)
+            frame_counts.append(frames)
+            resolved_names.append(stack_name)
+
+        max_frames = max(frame_counts)
+        anim_count = len(seqs)
+        anim_tensor = torch.zeros(
+            anim_count,
+            max_frames,
+            len(dof_names),
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        base_quat_tensor = torch.zeros(
+            anim_count,
+            max_frames,
+            4,
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        base_height_tensor = torch.zeros(
+            anim_count,
+            max_frames,
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        for idx, seq in enumerate(seqs):
+            seq_t = torch.tensor(seq, dtype=gs.tc_float, device=self.device)
+            anim_tensor[idx, : seq_t.shape[0], :] = seq_t
+            if seq_t.shape[0] < max_frames:
+                anim_tensor[idx, seq_t.shape[0] :, :] = seq_t[-1:]
+            base_t = torch.tensor(base_seqs[idx], dtype=gs.tc_float, device=self.device)
+            base_quat_tensor[idx, : base_t.shape[0], :] = base_t
+            if base_t.shape[0] < max_frames:
+                base_quat_tensor[idx, base_t.shape[0] :, :] = base_t[-1:]
+            base_height_t = torch.tensor(base_height_seqs[idx], dtype=gs.tc_float, device=self.device)
+            base_height_tensor[idx, : base_height_t.shape[0]] = base_height_t
+            if base_height_t.shape[0] < max_frames:
+                base_height_tensor[idx, base_height_t.shape[0] :] = base_height_t[-1:]
+
+        self.anim_names = resolved_names
+        self.anim_dof_seq = anim_tensor
+        self.anim_base_quat_seq = base_quat_tensor
+        self.anim_base_height_seq = base_height_tensor
+        self.anim_frame_counts = torch.tensor(
+            frame_counts, dtype=gs.tc_int, device=self.device
+        )
+        self.anim_frame_count = int(max_frames)
+        self.anim_name = self.anim_names[0]
+
+    def _sync_gait_period(self, env_ids=None):
+        """Keep gait_period equal to the selected animation duration."""
+        if self.anim_frame_counts is None or not hasattr(self, "anim_index"):
+            return
+        if env_ids is None:
+            anim_idx = torch.clamp(self.anim_index, 0, self.anim_frame_counts.shape[0] - 1)
+        else:
+            anim_idx = torch.clamp(self.anim_index[env_ids], 0, self.anim_frame_counts.shape[0] - 1)
+        frame_counts = self.anim_frame_counts[anim_idx].to(self.gait_period.dtype)
+        durations = torch.clamp(frame_counts - 1.0, min=1.0) / self.fbx_scene.fps
+        if env_ids is None:
+            self.gait_period[:, 0] = durations
+        else:
+            self.gait_period[env_ids, 0] = durations
+
+    def _update_anim_targets(self):
+        """Update per-env animation targets based on gait_time."""
+        if self.anim_dof_seq is None or self.anim_frame_counts is None or self.anim_frame_count <= 0:
+            return
+        walking = None
+        if self.anim_frame_counts.shape[0] > 1:
+            walking = torch.norm(self.commands[:, :2], dim=1) > 0.0
+            self.anim_index = torch.where(
+                walking,
+                torch.ones_like(self.anim_index),
+                torch.zeros_like(self.anim_index),
+            )
+        self._sync_gait_period()
+        if walking is not None:
+            walking_mask = walking.unsqueeze(1)
+            self.gait_time = torch.where(walking_mask, self.gait_time, self.gait_period)
+        phase = self.gait_time / self.gait_period
+        phase = torch.clamp(phase, 0.0, 1.0).squeeze(-1)
+        if hasattr(self, "reset_buf"):
+            phase = torch.where(self.reset_buf, torch.zeros_like(phase), phase)
+        anim_idx = torch.clamp(self.anim_index, 0, self.anim_frame_counts.shape[0] - 1)
+        frame_counts = self.anim_frame_counts[anim_idx]
+        max_frame = torch.clamp(frame_counts - 1, min=0)
+        frame_float = phase * max_frame.to(phase.dtype)
+        frame_idx = torch.clamp((frame_float + 0.5).to(torch.long), min=0)
+        frame_idx = torch.minimum(frame_idx, max_frame.to(torch.long))
+        self.anim_frame_idx = frame_idx
+        self.anim_dof_targets = self.anim_dof_seq[anim_idx, frame_idx]
+        if self.anim_base_quat_seq is not None:
+            self.anim_base_quat_targets = self.anim_base_quat_seq[anim_idx, frame_idx]
+        if self.anim_base_height_seq is not None:
+            self.anim_base_height_targets = self.anim_base_height_seq[anim_idx, frame_idx]
 
     def _clock_phase(self):
         """Recover phase in [0, 1) from sin/cos clock inputs."""
@@ -994,8 +1418,8 @@ class GO2Mimic(BaseTask):
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
         # Observation layout (per frame): cmd(3), grav(3), base_lin_acc(3), base_ang_vel(3),
-        # dof_pos(12), dof_vel(12), last_actions(12), clock(2), gait(1), base_h(1),
-        # foot_clearance(1), fixed_pitch(1), arm_left(4), arm_right(4)
+        # dof_pos(12), dof_vel(12), last_actions(12), clock(2), gait(1), anim_index(1),
+        # anim_target_quat(4), anim_target_pitch(1), anim_base_height(1), anim_dof_targets(12)
         i = 0
         noise_vec[i:i+3] = 0.  # commands
         i += 3
@@ -1010,6 +1434,20 @@ class GO2Mimic(BaseTask):
         noise_vec[i:i+self.num_actions] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel  # dp_t
         i += self.num_actions
         noise_vec[i:i+self.num_actions] = 0.  # a_{t-dt}
+        i += self.num_actions
+        noise_vec[i:i+2] = 0.  # clock
+        i += 2
+        noise_vec[i:i+1] = 0.  # gait period
+        i += 1
+        noise_vec[i:i+1] = 0.  # anim index
+        i += 1
+        noise_vec[i:i+4] = 0.  # anim target quat
+        i += 4
+        noise_vec[i:i+1] = 0.  # anim target pitch
+        i += 1
+        noise_vec[i:i+1] = 0.  # anim base height
+        i += 1
+        noise_vec[i:i+self.num_actions] = 0.  # anim dof targets
         i += self.num_actions
         if self.cfg.terrain.measure_heights and hasattr(self, "num_height_points"):
             end = i + self.num_height_points
@@ -1063,8 +1501,6 @@ class GO2Mimic(BaseTask):
         self.base_axis_lat = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.base_axis_dn = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
 
-        self.foot_clearance_target = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
-        self.foot_clearance_target[:, :] = self.cfg.rewards.behavior_params_range.foot_clearance_target_range[0]
         self.last_contacts = torch.zeros((self.num_envs, len(self.feet_indices)), device=self.device, dtype=gs.tc_int)
         self.link_contact_forces = torch.zeros((self.num_envs, self.robot.n_links, 3), device=self.device, dtype=gs.tc_float)
         self.feet_pos = torch.zeros((self.num_envs, len(self.feet_indices), 3), device=self.device, dtype=gs.tc_float)
@@ -1077,6 +1513,32 @@ class GO2Mimic(BaseTask):
         if self.cfg.terrain.measure_heights:
             self.height_points = self._init_height_points()
         self.measured_heights = 0
+
+        self.target_quat = torch.zeros(
+            self.num_envs,
+            4,
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        self.target_pitch = torch.zeros(
+            self.num_envs,
+            1,
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        self.anim_base_height = torch.zeros(
+            self.num_envs,
+            1,
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        self.anim_dof_pos = torch.zeros(
+            self.num_envs,
+            self.num_actions,
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+
 
         # randomize action delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -1140,13 +1602,34 @@ class GO2Mimic(BaseTask):
         self.dummy_obs = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
 
         self.pitch_target = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
-        self.pitch_target[:, :] = self.cfg.rewards.behavior_params_range.pitch_target_range[1]
-        self.fixed_pitch_target = torch.ones(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
-        self.base_height_target = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device)
-        self.base_height_target[:, :] = self.cfg.rewards.behavior_params_range.base_height_target_range[1]
 
-        self.arm_left_target = torch.zeros(self.num_envs, 4, dtype=gs.tc_float, device=self.device)
-        self.arm_right_target = torch.zeros(self.num_envs, 4, dtype=gs.tc_float, device=self.device)
+        self.anim_frame_idx = torch.zeros(self.num_envs, dtype=gs.tc_int, device=self.device)
+        self.anim_index = torch.zeros(self.num_envs, dtype=gs.tc_int, device=self.device)
+        self.anim_dof_targets = torch.zeros(
+            self.num_envs,
+            len(self.cfg.asset.dof_names),
+            dtype=gs.tc_float,
+            device=self.device,
+        )
+        self.anim_base_quat_targets = torch.zeros(self.num_envs, 4, dtype=gs.tc_float, device=self.device)
+        self.anim_base_height_targets = torch.zeros(self.num_envs, dtype=gs.tc_float, device=self.device)
+        if not hasattr(self, "anim_dof_seq"):
+            self.anim_dof_seq = None
+        if not hasattr(self, "anim_frame_count"):
+            self.anim_frame_count = 0
+        if not hasattr(self, "anim_name"):
+            self.anim_name = None
+        if not hasattr(self, "anim_cache"):
+            self.anim_cache = {}
+        if not hasattr(self, "anim_frame_counts"):
+            self.anim_frame_counts = None
+        if not hasattr(self, "anim_names"):
+            self.anim_names = []
+        if not hasattr(self, "anim_base_quat_seq"):
+            self.anim_base_quat_seq = None
+        if not hasattr(self, "anim_base_height_seq"):
+            self.anim_base_height_seq = None
+        self._sync_gait_period()
 
         # When the Z value of the forward vector reach below this Z value, terminate
         self.termination_z = self.cfg.domain_rand.termination_z
@@ -1172,6 +1655,13 @@ class GO2Mimic(BaseTask):
         asset_path = self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
         asset_root = os.path.dirname(asset_path)
         asset_file = os.path.basename(asset_path)
+
+        # Create fbx animator (single shared scene)
+        self.fbx_scene = FbxScene(
+            self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
+            self.cfg.asset.fbx_file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
+        )
+        self.animator = Animator(self.fbx_scene)
 
         self.robot = self.scene.add_entity(
             gs.morphs.URDF(
@@ -1210,6 +1700,8 @@ class GO2Mimic(BaseTask):
         self.joint_dof_mapping = {name: idx for idx, name in enumerate(self.cfg.asset.dof_names)}
         for k, v in self.joint_dof_mapping.items():
             print(f"{k}: {v}")
+
+        self._build_anim_cache()
 
         self.dof_arm_left_idx = [self.joint_dof_mapping["FL_hip_joint"],
                                  self.joint_dof_mapping["FL_thigh_joint"],
@@ -1391,20 +1883,6 @@ class GO2Mimic(BaseTask):
         mapping = {name: {"dof_idx": idx, "robot_dof_start": robot_joint_map[name].dof_start} for name, idx in zip(self.cfg.asset.dof_names, dof_idx)}
         print(f"[INFO] DOF mapping (name -> dof_idx / robot_dof_start): {mapping}")
 
-    def _neg_reward_hip_pos(self):
-        # Negative reward
-        hip_joint_indices_all = [0, 3, 6, 9]
-        hip_joint_indices_rear = [6, 9]
-        pitch_error = torch.square(self.base_axis_fwd[:, 2] - self.fixed_pitch_target.squeeze(1))
-        # Only penalize hips joints rear when upright standing
-        dof_pos_error = torch.where(pitch_error < 0.2,
-                        torch.sum(torch.square(self.dof_pos[:, hip_joint_indices_rear] - self.default_dof_pos[hip_joint_indices_rear]), dim=-1),
-                        torch.sum(torch.square(self.dof_pos[:, hip_joint_indices_all] - self.default_dof_pos[hip_joint_indices_all]), dim=-1))
-        return dof_pos_error
-    # def _neg_reward_ang_vel_xy(self):
-    #     # Penalize
-    #     return torch.sum(torch.square(self.robot.get_ang()[:, 1:2]), dim=1)  # small penalty
-
     def _neg_reward_dof_vel(self):
         # Penalize dof velocities
         return torch.sum(torch.square(self.dof_vel), dim=1)
@@ -1426,23 +1904,6 @@ class GO2Mimic(BaseTask):
         # Penalize collisions on selected bodies
         return torch.sum(10.*(torch.norm(self.link_contact_forces[:, self.penalized_indices, :], dim=-1) > 0.1), dim=1)
 
-    def _neg_reward_foot_orientation(self):
-        """Penalize feet that contact the ground with large tilt (not flat)."""
-        # Contact mask: any meaningful force on the feet
-        contact_mag = torch.norm(self.link_contact_forces[:, self.feet_indices, :], dim=-1)
-        contact_mask = (contact_mag > 1.0).float()
-
-        # Foot "up" vector in world; compare to world up (gravity opposite)
-        world_up = torch.tensor([0.0, 0.0, 1.0], device=self.device, dtype=gs.tc_float)
-        cos_theta = torch.abs(torch.sum(self.feet_up_world * world_up, dim=-1)).clamp(-1.0, 1.0)
-        angle = torch.acos(cos_theta)
-
-        sigma = self.cfg.rewards.foot_orientation_sigma
-        tilt_cost = 1.0 - torch.exp(-(angle ** 2) / (2 * sigma * sigma))
-
-        # zero cost when not in contact
-        return torch.sum(tilt_cost * contact_mask, dim=1)
-
     def _neg_reward_termination(self):
         # Terminal reward / penalty
         return self.reset_buf * ~self.time_out_buf
@@ -1457,78 +1918,6 @@ class GO2Mimic(BaseTask):
         # penalize torques too close to the limit
         return torch.sum((torch.abs(self.torques) - self.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
 
-    def _neg_reward_pitch_rate(self):
-        # up = body +X in world; pitch back => base_ang around body Y in world coordinates
-        w_world = self.robot.get_ang()
-        pitch_rate = torch.sum(w_world * self.base_axis_lat, dim=1)  # rotate around +Y
-        # only penalize when leaning back (axis_fwd.z dropping below target)
-        back_lean = (self.base_euler[:, 1] < -1.570796).float()
-        #print(f"back_lean: {back_lean}  pitch_rate: {pitch_rate}")
-        return back_lean * (pitch_rate**2)
-
-
-    def _neg_reward_hind_spread_contact(self):
-        """Penalize hind feet fore–aft spread when both are in contact and not moving."""
-        cmd_xy_yaw = self.commands[:, :3]
-        moving = torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal
-        hind_contact = (self.link_contact_forces[:, self.feet_indices[2:], 2].abs() > 1.0)
-        both_contact = hind_contact.all(dim=1)
-
-        inv_base_quat = gs_inv_quat(self.base_quat)
-        hind_pos_world = self.feet_pos[:, 2:, :]
-        hind_pos_rel = hind_pos_world - self.base_pos[:, None, :]
-        hind_flat = hind_pos_rel.reshape(-1, 3)
-        quat_flat = inv_base_quat.repeat_interleave(hind_pos_rel.shape[1], dim=0)
-        hind_base_flat = transform_by_quat(hind_flat, quat_flat)
-        hind_pos_base = hind_base_flat.view(hind_pos_rel.shape)
-
-        spread = hind_pos_base[:, 0, 0] - hind_pos_base[:, 1, 0]
-        spread_sq = spread * spread
-
-        sigma = self.cfg.rewards.hind_spread_sigma
-        cost = spread_sq / (2.0 * sigma * sigma)
-        active = (~moving) & both_contact
-        cost = torch.where(active, cost, torch.zeros_like(cost))
-        return cost
-
-    def _neg_reward_static_walk(self):
-        f_rl = self._contact_mag(self.foot_index_rl) > 1.0
-        f_rr = self._contact_mag(self.foot_index_rr) > 1.0
-        both = (f_rl & f_rr).float()  # [B]
-
-        cmd = self.commands[:, :3]       # [B, 3]
-        cmd_mag = torch.norm(cmd, dim=1) # [B]
-
-        deadzone = 0.05
-        # How far outside deadzone we are, clamped at 0
-        cmd_excess = torch.clamp(cmd_mag - deadzone, min=0.0)
-
-        # Penalty: nonzero only when cmd_mag > deadzone AND both feet in contact
-        cost = both * cmd_excess
-        return cost
-
-    def _neg_reward_trot_in_place(self):
-        """Penalize foot motion while stationary and upright."""
-        # Only active when commanded to stand still
-        active = self.is_stationary
-        if not torch.any(active):
-            return torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
-
-        # Negative reward
-        thigh_joint_indices_rear = [7, 10]
-        # Penalize angles of thigh != 2.0
-        target = 2.0
-        diff = self.dof_pos[active][:, thigh_joint_indices_rear] - target
-        dof_pos_error = torch.sum(torch.square(diff), dim=-1)
-
-        gate = self._biped_orientation_gate()[active]
-        reward_active = torch.lerp(torch.zeros_like(dof_pos_error), dof_pos_error, gate)
-        reward = torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
-        reward[active] = reward_active
-
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
-
     def count_bad(self, loc):
         n_nan_loc   = torch.isnan(loc).sum().item()
         n_inf_loc   = torch.isinf(loc).sum().item()
@@ -1540,12 +1929,6 @@ class GO2Mimic(BaseTask):
 
     def _biped_orientation_gate(self, force_angle=None):
         # Gate shaping rewards: 1 when aligned, 0 when far from target
-        # target = self.fixed_pitch_target.squeeze(1)
-        # error = torch.abs(self.base_axis_fwd[:, 2] - target)
-        # window = max(self.cfg.rewards.biped_shaping_pitch_window, 1e-6)
-        # gate = torch.clamp(error / window, 0.0, 1.0)
-        # return 1.0 - gate
-
         pitch_angle = torch.atan2(self.base_axis_fwd[:, 2], torch.norm(self.base_axis_fwd[:, :2], dim=1))
         if force_angle is None:
             target = 1.570796 # 90.0 degrees
@@ -1558,75 +1941,41 @@ class GO2Mimic(BaseTask):
         gate = torch.clamp(error / window, 0.0, 1.0)
         return 1.0 - gate
 
-
-
-    def _reward_arm_angles(self):
-        # ---- gather & validate shapes ----
-        left_pos  = self.dof_pos[:, self.dof_arm_left_idx]           # [N, JL]
-        right_pos = self.dof_pos[:, self.dof_arm_right_idx]          # [N, JR]
-        left_tgt  = self.arm_left_target[:, :left_pos.shape[1]]      # [N, JL]
-        right_tgt = self.arm_right_target[:, :right_pos.shape[1]]    # [N, JR]
-
-        # ---- wrap-aware per-joint errors ----
-        left_d   = self._angle_diff(left_pos,  left_tgt)
-        right_d  = self._angle_diff(right_pos, right_tgt)
-
-        # option A: cosine loss (bounded, wrap-safe)
-        # per-joint cost in [0, 2], small near 0
-        left_c   = 1.0 - torch.cos(left_d)
-        right_c  = 1.0 - torch.cos(right_d)
-
-        # average per joint so a single joint can't nuke the reward
-        left_err  = left_c.mean(dim=-1)      # [N]
-        right_err = right_c.mean(dim=-1)     # [N]
-        err = 0.5 * (left_err + right_err)   # [N]
-
-        # ---- shaping ----
-        # Choose ONE of the following:
-
-        # (1) Gaussian-like (use σ as a *scale* in same units as the cost above)
-        # Typical σ ~ 0.1–0.3 for cosine cost; tune.
-#        sigma = self.cfg.rewards.arm_angle_sigma
-#        reward = torch.exp(-err / (2.0 * sigma * sigma))
-
-        # (2) Smooth rational (less saturation, easier to tune)
-        # k ~ 5–20 sets “how sharp” the peak is.
-        k = self.cfg.rewards.arm_angle_k
+    def _reward_anim_dof_pos(self):
+        if self.anim_dof_seq is None:
+            print("Error anim")
+            return torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+        diff = self._angle_diff(self.dof_pos, self.anim_dof_targets)
+        cost = 1.0 - torch.cos(diff)
+        err = cost.mean(dim=-1)
+        k = self.cfg.rewards.anim_dof_k
         reward = 1.0 / (1.0 + k * err)
+        return reward
 
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
+    def _reward_anim_base_height(self):
+        if self.anim_base_height_seq is None:
+            return torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
 
-    def _reward_orientation(self):
-        pitch_angle = torch.atan2(self.base_axis_fwd[:, 2], torch.norm(self.base_axis_fwd[:, :2], dim=1))
-        pitch_error = torch.abs(pitch_angle - 1.570796)
+        base_height = torch.mean(self.base_pos[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        rew = torch.square(base_height - self.anim_base_height_targets)
+        reward = torch.exp(-rew / self.cfg.rewards.base_height_tracking_sigma)
+        return reward
+
+    def _reward_anim_base_orient(self):
+        if self.anim_base_quat_seq is None:
+            return torch.zeros(self.num_envs, device=self.device, dtype=gs.tc_float)
+
+        target = normalize(self.anim_base_quat_targets)
+        target_fwd = gs_quat_apply(target, self.forward_vec)
+
+        base_pitch = torch.atan2(self.base_axis_fwd[:, 2], torch.norm(self.base_axis_fwd[:, :2], dim=1))
+        target_pitch = torch.atan2(target_fwd[:, 2], torch.norm(target_fwd[:, :2], dim=1))
+
+        pitch_error = torch.abs(base_pitch - target_pitch)
+        #print(f"time {self.gait_time[0]} Target {target_pitch[0]} vs {base_pitch[0]} ")
         tracking_reward = torch.exp(-pitch_error / self.cfg.rewards.euler_tracking_sigma)
         return tracking_reward
 
-    def _reward_walk_side_bobbing(self):
-        # Reward side-to-side bobbing when walking forward
-        roll_angle = torch.atan2(self.base_axis_fwd[:, 0], torch.norm(self.base_axis_fwd[:, 1:2], dim=1))
-
-        phase = self._clock_phase()
-        roll_range_rad = 10.0 * 0.01745329
-        roll_target = (phase * 2.0 - 1.0) * roll_range_rad  # -roll_range to +roll_range
-        roll_error = torch.abs(roll_angle - roll_target)
-        tracking_reward = torch.exp(-roll_error / self.cfg.rewards.roll_tracking_sigma)
-
-        cmd_xy = self.commands[:, :2]
-        reward = torch.where(torch.norm(cmd_xy, dim=1) >= self.cfg.commands.min_normal,
-                            tracking_reward,
-                            torch.zeros_like(tracking_reward))
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
-
-    def _reward_base_height_target(self):
-        # Modulate base_height_target by pitch_error. Less errors == more toward base_height_target, less, move toward 0.5 * base_target
-        base_height = torch.mean(self.base_pos[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
-        rew = torch.square(base_height - self.base_height_target.squeeze(1))
-        reward = torch.exp(-rew / self.cfg.rewards.base_height_tracking_sigma)
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
 
     def _reward_tracking_ang_vel(self):
         up = self.base_axis_fwd                           # biped up in world
@@ -1640,7 +1989,6 @@ class GO2Mimic(BaseTask):
         reward = torch.exp(-err / self.cfg.rewards.tracking_sigma)
         gate = self._biped_orientation_gate()
         return torch.lerp(torch.zeros_like(reward), reward, gate)
-
 
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
@@ -1658,162 +2006,5 @@ class GO2Mimic(BaseTask):
         lin_vel_error = torch.sum(torch.square(cmd - vel), dim=1)
 
         reward = torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma) # * cmd_gate
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
-
-    def _contact_mag(self, idx):  # smooth contact metric
-        return torch.norm(self.link_contact_forces[:, idx, :], dim=-1)
-
-    def _reward_front_feet_off(self):
-        f_fl = self._contact_mag(self.foot_index_fl)
-        f_fr = self._contact_mag(self.foot_index_fr)
-        x = f_fl + f_fr
-        reward = torch.exp(-(x * x) / 500.0)
-        return reward
-
-    def _reward_front_feet_on_ground_push(self):
-        # Get contact forces for the front left and front right feet
-        f_fl = self.link_contact_forces[:, self.foot_index_fl, :]  # Contact force vector for front left foot
-        f_fr = self.link_contact_forces[:, self.foot_index_fr, :]  # Contact force vector for front right foot
-
-        # Transform forces to the robot's local frame
-        inv_base_quat = gs_inv_quat(self.base_quat)
-        f_fl_local = transform_by_quat(f_fl, inv_base_quat)  # Transform to local frame
-        f_fr_local = transform_by_quat(f_fr, inv_base_quat)  # Transform to local frame
-
-        # Extract Z (vertical) components
-        f_fl_push = f_fl_local[:, 2]
-        f_fr_push = f_fr_local[:, 2]
-
-        # Reward backward force (negative X-component)
-        push_reward = torch.exp(-((f_fl_push + f_fr_push)**2) / 50.0)
-
-        # Ensure reward is only applied when feet are in contact
-        contact_fl = self._contact_mag(self.foot_index_fl) > 1.0
-        contact_fr = self._contact_mag(self.foot_index_fr) > 1.0
-        contact = contact_fl | contact_fr  # Either foot in contact
-
-        reward = torch.where(contact.float() > 0.0, push_reward * contact.float(), 1.0)
-        return reward
-
-    def _reward_hind_alternation(self):
-        # encourage alternating single support (one foot on, other off)
-        f_rl = self._contact_mag(self.foot_index_rl) > 1.0
-        f_rr = self._contact_mag(self.foot_index_rr) > 1.0
-        both  = (f_rl & f_rr).float()
-        none  = (~f_rl & ~f_rr).float()
-        #single = (f_rl ^ f_rr).float()
-
-        phase = self._clock_phase()
-        # Select which foot is expected to be on ground
-        single = torch.where(phase < 0.5, f_rl.float(), f_rr.float())
-
-        # reward exactly one in contact (and softly penalize both/none)
-        # if no commands (standing still) then reward both feet
-        cmd_xy_yaw = self.commands[:, :3]
-        moving = torch.logical_or(
-            torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal,
-            torch.logical_or(
-                torch.abs(self.base_ang_vel[:, 0]) > 0.05,
-                torch.logical_or(torch.abs(self.base_lin_vel[:, 1]) > 0.05, # y
-                                 torch.abs(self.base_lin_vel[:, 2]) > 0.05) # z (front)
-            )
-        )
-        rew_standing = 1.0*both - 1.0*none - 1.0*single
-        rew_moving = 1.0*single - 0.3*both - 0.8*none
-        reward = torch.where(moving, rew_moving, rew_standing)
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
-
-    def _reward_hind_foot_clearance(self):
-        # Swing foot comes from the clock, but we only penalize when it is actually in swing (not loaded).
-        p_rl = self.feet_pos[:, 2, :]
-        p_rr = self.feet_pos[:, 3, :]
-        phase = self._clock_phase()
-        swing_rl = (phase > 0.5)
-        hind = torch.where(swing_rl.unsqueeze(-1), p_rl, p_rr)
-
-        # Terrain-relative height of the swing foot
-        hind_height = hind[:, 2] - self._terrain_height_at_points(hind[:, :2])
-
-        # Contact proxy: consider the phi-selected foot to be swing only if not loaded
-        hind_contacts = (self.link_contact_forces[:, self.feet_indices[2:], 2].abs() > 1.0)
-        swing_contact = torch.where(swing_rl, hind_contacts[:, 0], hind_contacts[:, 1])
-        swing_mask = (~swing_contact).float()
-
-        target = (self.foot_clearance_target + self.cfg.rewards.foot_height_offset).squeeze(-1)
-        below_target = torch.clamp(target - hind_height, min=0.0)
-
-        # Deadzone on command magnitude; skip when essentially stationary
-        cmd_mag = torch.norm(self.commands[:, :3], dim=1)
-        cmd_gate = (cmd_mag > 0.05).float()
-
-        # Penalize clearance error only when (a) command present and (b) swing foot not in contact
-        clearance_error = cmd_gate * swing_mask * (below_target ** 2)
-        reward = torch.exp(-clearance_error / self.cfg.rewards.foot_clearance_tracking_sigma)
-        return reward
-
-    def _reward_clock_contact_consistency(self):
-        # Encourage contact pattern to match clock phase with a soft signal.
-        mag_rl = self._contact_mag(self.foot_index_rl)
-        mag_rr = self._contact_mag(self.foot_index_rr)
-        force_thresh = self.cfg.rewards.clock_contact_force_threshold
-        force_scale = self.cfg.rewards.clock_contact_force_scale
-        contact_rl = torch.sigmoid((mag_rl - force_thresh) / force_scale)
-        contact_rr = torch.sigmoid((mag_rr - force_thresh) / force_scale)
-
-        phase = self._clock_phase()
-        expect_rl = phase < 0.5
-        stance = torch.where(expect_rl, contact_rl, contact_rr)
-        swing = torch.where(expect_rl, contact_rr, contact_rl)
-
-        # De-emphasize the transition region where sin ~= 0.
-        phase_weight = torch.abs(self.clock_input[:, 0])
-        phase_weight = torch.pow(phase_weight, self.cfg.rewards.clock_phase_weight_power)
-        phase_weight = torch.clamp(phase_weight, min=self.cfg.rewards.clock_phase_weight_floor)
-        reward = phase_weight * torch.clamp(stance - swing, min=0.0)
-
-        cmd_xy_yaw = self.commands[:, :3]
-        moving = torch.logical_or(
-            torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal,
-            torch.logical_or(
-                torch.abs(self.base_ang_vel[:, 0]) > 0.05,
-                torch.logical_or(torch.abs(self.base_lin_vel[:, 1]) > 0.05, # y
-                                 torch.abs(self.base_lin_vel[:, 2]) > 0.05) # z (front)
-            )
-        )
-        reward = torch.where(moving, reward, torch.zeros_like(reward))
-        gate = self._biped_orientation_gate()
-        return torch.lerp(torch.zeros_like(reward), reward, gate)
-
-    def _reward_feet_under_base(self):
-        """Reward hind feet being tucked under the base (small fore–aft spread) when standing still."""
-        base_x = self.base_pos[:, 0]
-        p_rl = self.feet_pos[:, 2, 0]
-        p_rr = self.feet_pos[:, 3, 0]
-        x_err_rl = torch.square(base_x - p_rl)
-        x_err_rr = torch.square(base_x - p_rr)
-
-        sigma = self.cfg.rewards.feet_under_base_sigma
-        reward = torch.exp(-(x_err_rl + x_err_rr) / (2.0 * sigma * sigma))
-
-        hind_contact = (self.link_contact_forces[:, self.feet_indices[2:], 2].abs() > 1.0)
-        hind_contact_any = hind_contact.any(dim=1)
-
-        cmd_xy_yaw = self.commands[:, :3]
-        moving = torch.norm(cmd_xy_yaw, dim=1) >= self.cfg.commands.min_normal
-        active = (~moving)
-        # Ones like reward to encourage moving
-        reward = torch.where(active & hind_contact_any, reward, torch.ones_like(reward))
-        return reward
-
-    def _reward_com_over_support(self):
-        p_rl = self.feet_pos[:, 2, :2]
-        p_rr = self.feet_pos[:, 3, :2]
-        com  = self.robot_com[:, :2]
-        # targets
-        p_mid = 0.5*(p_rl + p_rr)
-        d = torch.norm(com - p_mid, dim=-1)
-        reward = torch.exp(-(d * d) / 0.03)      # sigma ≈ 0.173 m
         gate = self._biped_orientation_gate()
         return torch.lerp(torch.zeros_like(reward), reward, gate)

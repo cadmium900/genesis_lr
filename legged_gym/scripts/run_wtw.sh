@@ -1,0 +1,12 @@
+export OMP_NUM_THREADS=4,3,2
+
+if [ -n "$PYTORCH_CUDA_ALLOC_CONF" ] && [ -z "$PYTORCH_ALLOC_CONF" ]; then
+  export PYTORCH_ALLOC_CONF="$PYTORCH_CUDA_ALLOC_CONF"
+fi
+
+#TORCH_DISTRIBUTED_DEBUG=DETAIL \
+#TORCH_NCCL_TRACE_BUFFER_SIZE=1048576 \
+#NCCL_DEBUG=INFO \
+#CUDA_LAUNCH_BLOCKING=1 \
+
+torchrun --nproc_per_node=2 ./train.py --task go2_wtw --headless

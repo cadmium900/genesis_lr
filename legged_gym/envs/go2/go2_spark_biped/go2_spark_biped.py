@@ -133,11 +133,21 @@ class GO2SparkBiped(BaseTask):
             actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
         """
         clip_actions = self.cfg.normalization.clip_actions
-        self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        full_actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        # Split: first num_dofs = position targets, rest = gain scale actions (kp + kd)
+        self.actions = full_actions[:, :self.num_dofs]
+        self.gain_actions = full_actions[:, self.num_dofs:]
         if self.cfg.domain_rand.randomize_ctrl_delay:
             self.action_queue[:, 1:] = self.action_queue[:, :-1].clone()
             self.action_queue[:, 0] = self.actions.clone()
             self.actions = self.action_queue[torch.arange(self.num_envs), self.action_delay].clone()
+        # Compute policy kp/kd scale factors via sigmoid -> [gain_scale_range], then EMA filter
+        low, high = self.gain_scale_range
+        alpha = self.cfg.control.gain_filter_alpha
+        kp_target = low + (high - low) * torch.sigmoid(self.gain_actions[:, :self.num_dofs])
+        kd_target = low + (high - low) * torch.sigmoid(self.gain_actions[:, self.num_dofs:])
+        self._policy_kp_scale = alpha * kp_target + (1.0 - alpha) * self._policy_kp_scale
+        self._policy_kd_scale = alpha * kd_target + (1.0 - alpha) * self._policy_kd_scale
         for _ in range(self.cfg.control.decimation):  # use self-implemented pd controller
             self.torques = self._compute_torques(self.actions)
             if self.num_build_envs == 0:
@@ -211,7 +221,7 @@ class GO2SparkBiped(BaseTask):
         self.base_euler = gs_quat2euler(base_quat_rel)
         inv_base_quat = inv_quat(self.base_quat)
         self.base_lin_vel_world[:] = torch.nan_to_num(self.robot.get_vel(), nan=0.0, posinf=0.0, neginf=0.0)
-        self.base_lin_acc_world[:] = (self.base_lin_vel_world - prev_base_lin_vel_world) / self.dt
+        self.base_lin_acc_world[:] = (self.base_lin_vel_world - self.prev_base_lin_vel_world) / self.dt
         acc_world_with_gravity = self.base_lin_acc_world - self.gravity_world
         self.base_lin_acc_body[:] = transform_by_quat(acc_world_with_gravity, inv_base_quat)
         self.base_lin_vel[:] = transform_by_quat(self.base_lin_vel_world, inv_base_quat) # transform to base frame
@@ -242,9 +252,13 @@ class GO2SparkBiped(BaseTask):
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
+        # Track contact transitions for impact penalty
+        self.cur_contacts = (torch.norm(self.link_contact_forces[:, self.feet_indices, :], dim=-1) > 1.0).long()
+        self.new_contacts = self.cur_contacts & (~self.last_contacts.bool()).long()
         self.check_base_pos_out_of_bound()
         self.check_termination()
         self.compute_reward()
+        self.last_contacts[:] = self.cur_contacts
         # Periodic Reward Framework phi cycle
         # step after computing reward but before resetting the env
         self.gait_time += self.dt
@@ -263,6 +277,7 @@ class GO2SparkBiped(BaseTask):
         self.compute_observations() # in some cases a simulation step might be required to refresh some obs (for example body positions)
         self.llast_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
+        self.last_gain_actions[:] = self.gain_actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         if self.debug_viz:
             self._draw_debug_vis(env_ids)
@@ -465,9 +480,16 @@ class GO2SparkBiped(BaseTask):
         # control_type = 'P'
         actions_scaled = actions * self.cfg.control.action_scale
         torques = (
-            self._kp_scale * self.p_gains * (actions_scaled + self.default_dof_pos - self.dof_pos)
-            - self._kd_scale * self.d_gains * self.dof_vel
+            self._kp_scale * self._policy_kp_scale * self.p_gains * (actions_scaled + self.default_dof_pos - self.dof_pos)
+            - self._kd_scale * self._policy_kd_scale * self.d_gains * self.dof_vel
         )
+        # Apply joint friction loss (smooth coulomb friction opposing joint velocity)
+        # Models MuJoCo's frictionloss parameter using tanh to avoid chattering at zero velocity
+        if getattr(self.cfg.domain_rand, 'randomize_joint_friction_loss', False):
+            friction_loss = self._joint_friction_loss  # (num_envs, 1)
+            torques = torques - friction_loss * torch.tanh(self.dof_vel / 0.1)
+        # Clamp torques to actuator limits (matches MuJoCo ctrlrange)
+        torques = torch.clamp(torques, -self.torque_limits, self.torque_limits)
         return torques
 
     def compute_observations(self):
@@ -481,13 +503,14 @@ class GO2SparkBiped(BaseTask):
             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,  # p_t     12 [12..23]
             self.dof_vel * self.obs_scales.dof_vel,        # dp_t    12 [24..35]
             self.actions,                                  # a_{t-1} 12 [36..47]
-            self.clock_input,                              # clock   2 [48..49]
-            self.gait_period,                              # gait period 1 [50]
-            self.base_height_target,                       # base height target 1 [51]
-            self.foot_clearance_target,                    # foot clearance target 1 [52]
-            self.fixed_pitch_target,                       # pitch target 1 [53]
-            self.arm_left_target[:, :4],                  # 4 [54..57]
-            self.arm_right_target[:, :4],                 # 4 [58..61]
+            self.gain_actions,                             # gain_a  24 [48..71]
+            self.clock_input,                              # clock   2 [72..73]
+            self.gait_period,                              # gait period 1 [74]
+            self.base_height_target,                       # base height target 1 [75]
+            self.foot_clearance_target,                    # foot clearance target 1 [76]
+            self.fixed_pitch_target,                       # pitch target 1 [77]
+            self.arm_left_target[:, :4],                  # 4 [78..81]
+            self.arm_right_target[:, :4],                 # 4 [82..85]
         ), dim=-1)
 
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -506,6 +529,7 @@ class GO2SparkBiped(BaseTask):
                 self.obs_scales.dof_pos,                       # p_t     12
                 self.dof_vel * self.obs_scales.dof_vel,        # dp_t    12
                 self.actions,                                  # a_{t-1} 12
+                self.gain_actions,                             # gain_a  24
                 self.clock_input,                              # clock   2
                 self.gait_period,                              # gait period 1
                 self.base_height_target,                       # base height target 1
@@ -524,6 +548,7 @@ class GO2SparkBiped(BaseTask):
                 self._joint_armature,                          # 1
                 self._joint_stiffness,                         # 1
                 self._joint_damping,                           # 1
+                self._joint_friction_loss,                     # 1
                 # privileged infos
             ), dim=-1)
 
@@ -574,9 +599,15 @@ class GO2SparkBiped(BaseTask):
             self._randomize_joint_stiffness(env_ids)
         if self.cfg.domain_rand.randomize_joint_damping:
             self._randomize_joint_damping(env_ids)
+        if getattr(self.cfg.domain_rand, 'randomize_joint_friction_loss', False):
+            self._randomize_joint_friction_loss(env_ids)
         # reset buffers
         self.llast_actions[env_ids] = 0.
         self.last_actions[env_ids] = 0.
+        self.gain_actions[env_ids] = 0.
+        self.last_gain_actions[env_ids] = 0.
+        self._policy_kp_scale[env_ids] = 1.0
+        self._policy_kd_scale[env_ids] = 1.0
         self.last_dof_vel[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -608,6 +639,13 @@ class GO2SparkBiped(BaseTask):
         self.extras["episode"]["pitch_target"] = torch.mean(self.pitch_target[:])
         self.extras["episode"]["foot_clearance_target"] = torch.mean(self.foot_clearance_target[:])
         self.extras["episode"]["base_height_target"] = torch.mean(self.base_height_target[:])
+        # Gain schedule stats for RR leg (indices 6=hip, 7=thigh, 8=calf)
+        self.extras["episode"]["kp_scale_RR_hip"]   = torch.mean(self._policy_kp_scale[:, 6])
+        self.extras["episode"]["kp_scale_RR_thigh"] = torch.mean(self._policy_kp_scale[:, 7])
+        self.extras["episode"]["kp_scale_RR_calf"]  = torch.mean(self._policy_kp_scale[:, 8])
+        self.extras["episode"]["kd_scale_RR_hip"]   = torch.mean(self._policy_kd_scale[:, 6])
+        self.extras["episode"]["kd_scale_RR_thigh"] = torch.mean(self._policy_kd_scale[:, 7])
+        self.extras["episode"]["kd_scale_RR_calf"]  = torch.mean(self._policy_kd_scale[:, 8])
 
         # reset action queue and delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
@@ -665,7 +703,7 @@ class GO2SparkBiped(BaseTask):
         armature = torch.rand((1,), dtype=gs.tc_float, device=self.device) \
         * (max_armature - min_armature) + min_armature # scalar
         self._joint_armature[env_ids, 0] = armature[0].detach().clone()
-        armature = armature.repeat(self.num_actions)  # repeat for all motors
+        armature = armature.repeat(self.num_dofs)  # repeat for all motors
         self.robot.set_dofs_armature(
             armature, self.motors_dof_idx, envs_idx=env_ids) # all environments share the same armature
         # This armature will be Refreshed when envs are reset
@@ -677,7 +715,7 @@ class GO2SparkBiped(BaseTask):
         stiffness = torch.rand((1,), dtype=gs.tc_float, device=self.device) \
         * (max_stiffness - min_stiffness) + min_stiffness
         self._joint_stiffness[env_ids, 0] = stiffness[0].detach().clone()
-        stiffness = stiffness.repeat(self.num_actions)
+        stiffness = stiffness.repeat(self.num_dofs)
         self.robot.set_dofs_stiffness(
             stiffness, self.motors_dof_idx, envs_idx=env_ids)
 
@@ -688,9 +726,18 @@ class GO2SparkBiped(BaseTask):
         damping = torch.rand((1,), dtype=gs.tc_float, device=self.device) \
         * (max_damping - min_damping) + min_damping
         self._joint_damping[env_ids, 0] = damping[0].detach().clone()
-        damping = damping.repeat(self.num_actions)
+        damping = damping.repeat(self.num_dofs)
         self.robot.set_dofs_damping(
             damping, self.motors_dof_idx, envs_idx=env_ids)
+
+    def _randomize_joint_friction_loss(self, env_ids):
+        """ Randomize joint friction loss (coulomb friction) of the robot.
+        Models MuJoCo's frictionloss parameter — a constant torque opposing joint motion.
+        """
+        min_fl, max_fl = self.cfg.domain_rand.joint_friction_loss_range
+        friction_loss = torch.rand((1,), dtype=gs.tc_float, device=self.device) \
+            * (max_fl - min_fl) + min_fl
+        self._joint_friction_loss[env_ids, 0] = friction_loss[0].detach().clone()
 
     def _reset_dofs(self, envs_idx):
         """ Resets DOF position and velocities of selected environmments
@@ -700,7 +747,7 @@ class GO2SparkBiped(BaseTask):
         Args:
             env_ids (List[int]): Environemnt ids
         """
-        self.dof_pos[envs_idx] = (self.default_dof_pos) + gs_rand_float(-0.3, 0.3, (len(envs_idx), self.num_actions), self.device)
+        self.dof_pos[envs_idx] = (self.default_dof_pos) + gs_rand_float(-0.3, 0.3, (len(envs_idx), self.num_dofs), self.device)
         self.dof_vel[envs_idx] = 0.0
         self.robot.set_dofs_position(
             position=self.dof_pos[envs_idx],
@@ -994,8 +1041,8 @@ class GO2SparkBiped(BaseTask):
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
         # Observation layout (per frame): cmd(3), grav(3), base_lin_acc(3), base_ang_vel(3),
-        # dof_pos(12), dof_vel(12), last_actions(12), clock(2), gait(1), base_h(1),
-        # foot_clearance(1), fixed_pitch(1), arm_left(4), arm_right(4)
+        # dof_pos(12), dof_vel(12), last_actions(12), gain_actions(24), clock(2), gait(1),
+        # base_h(1), foot_clearance(1), fixed_pitch(1), arm_left(4), arm_right(4)
         i = 0
         noise_vec[i:i+3] = 0.  # commands
         i += 3
@@ -1005,12 +1052,14 @@ class GO2SparkBiped(BaseTask):
         i += 3
         noise_vec[i:i+3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
         i += 3
-        noise_vec[i:i+self.num_actions] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos                    # p_t
-        i += self.num_actions
-        noise_vec[i:i+self.num_actions] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel  # dp_t
-        i += self.num_actions
-        noise_vec[i:i+self.num_actions] = 0.  # a_{t-dt}
-        i += self.num_actions
+        noise_vec[i:i+self.num_dofs] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos  # p_t
+        i += self.num_dofs
+        noise_vec[i:i+self.num_dofs] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel  # dp_t
+        i += self.num_dofs
+        noise_vec[i:i+self.num_dofs] = 0.  # a_{t-dt}
+        i += self.num_dofs
+        noise_vec[i:i+self.num_dofs*2] = 0.  # gain_actions
+        i += self.num_dofs * 2
         if self.cfg.terrain.measure_heights and hasattr(self, "num_height_points"):
             end = i + self.num_height_points
             if end <= noise_vec.shape[0]:
@@ -1050,12 +1099,16 @@ class GO2SparkBiped(BaseTask):
         self.commands = torch.zeros((self.num_envs, self.cfg.commands.num_commands), device=self.device, dtype=gs.tc_float)
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel],
                                             device=self.device, dtype=gs.tc_float, requires_grad=False,)
-        self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device, dtype=gs.tc_float)
+        self.actions = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=gs.tc_float)
         self.last_actions = torch.zeros_like(self.actions)
-        self.llast_actions = torch.zeros(self.num_envs, self.num_actions, dtype=gs.tc_float, device=self.device, requires_grad=False)  # last last actions
-        self.dof_pos = torch.zeros_like(self.actions, device=self.device, dtype=gs.tc_float)
-        self.dof_vel = torch.zeros_like(self.actions, device=self.device, dtype=gs.tc_float)
-        self.last_dof_vel = torch.zeros_like(self.actions)
+        self.llast_actions = torch.zeros(self.num_envs, self.num_dofs, dtype=gs.tc_float, device=self.device, requires_grad=False)  # last last actions
+        self.gain_actions = torch.zeros((self.num_envs, self.num_dofs * 2), device=self.device, dtype=gs.tc_float)
+        self.last_gain_actions = torch.zeros_like(self.gain_actions)
+        self._policy_kp_scale = torch.ones((self.num_envs, self.num_dofs), device=self.device, dtype=gs.tc_float)
+        self._policy_kd_scale = torch.ones((self.num_envs, self.num_dofs), device=self.device, dtype=gs.tc_float)
+        self.dof_pos = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=gs.tc_float)
+        self.dof_vel = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=gs.tc_float)
+        self.last_dof_vel = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=gs.tc_float)
         self.base_pos = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.robot_com = torch.zeros((self.num_envs, 3), device=self.device, dtype=gs.tc_float)
         self.base_quat = torch.zeros((self.num_envs, 4), device=self.device, dtype=gs.tc_float)
@@ -1081,7 +1134,7 @@ class GO2SparkBiped(BaseTask):
         # randomize action delay
         if self.cfg.domain_rand.randomize_ctrl_delay:
             self.action_queue = torch.zeros(
-                self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, self.num_actions, dtype=gs.tc_float, device=self.device, requires_grad=False)
+                self.num_envs, self.cfg.domain_rand.ctrl_delay_step_range[1]+1, self.num_dofs, dtype=gs.tc_float, device=self.device, requires_grad=False)
             self.action_delay = torch.randint(self.cfg.domain_rand.ctrl_delay_step_range[0],
                                               self.cfg.domain_rand.ctrl_delay_step_range[1]+1, (self.num_envs,), device=self.device, requires_grad=False)
 
@@ -1272,6 +1325,9 @@ class GO2SparkBiped(BaseTask):
         # randomize joint damping
         if self.cfg.domain_rand.randomize_joint_damping:
             self._randomize_joint_damping(np.arange(self.num_envs))
+        # randomize joint friction loss
+        if getattr(self.cfg.domain_rand, 'randomize_joint_friction_loss', False):
+            self._randomize_joint_friction_loss(np.arange(self.num_envs))
 
         # distinguish between 4 feet
         for i in range(len(self.feet_indices)):
@@ -1334,9 +1390,10 @@ class GO2SparkBiped(BaseTask):
         self._joint_armature = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device, requires_grad=False)
         self._joint_stiffness = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device, requires_grad=False)
         self._joint_damping = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device, requires_grad=False)
+        self._joint_friction_loss = torch.zeros(self.num_envs, 1, dtype=gs.tc_float, device=self.device, requires_grad=False)
 
-        self._kp_scale = torch.ones(self.num_envs, self.num_actions, dtype=gs.tc_float, device=self.device)
-        self._kd_scale = torch.ones(self.num_envs, self.num_actions, dtype=gs.tc_float, device=self.device)
+        self._kp_scale = torch.ones(self.num_envs, self.num_dofs, dtype=gs.tc_float, device=self.device)
+        self._kd_scale = torch.ones(self.num_envs, self.num_dofs, dtype=gs.tc_float, device=self.device)
 
     def _episodic_domain_randomization(self, env_ids):
         """ Update scale of Kp, Kd, rfi lim"""
@@ -1344,8 +1401,8 @@ class GO2SparkBiped(BaseTask):
             return
 
         if self.cfg.domain_rand.randomize_pd_gain:
-            self._kp_scale[env_ids] = gs_rand_float(self.cfg.domain_rand.kp_range[0], self.cfg.domain_rand.kp_range[1], (len(env_ids), self.num_actions), device=self.device)
-            self._kd_scale[env_ids] = gs_rand_float(self.cfg.domain_rand.kd_range[0], self.cfg.domain_rand.kd_range[1], (len(env_ids), self.num_actions), device=self.device)
+            self._kp_scale[env_ids] = gs_rand_float(self.cfg.domain_rand.kp_range[0], self.cfg.domain_rand.kp_range[1], (len(env_ids), self.num_dofs), device=self.device)
+            self._kd_scale[env_ids] = gs_rand_float(self.cfg.domain_rand.kd_range[0], self.cfg.domain_rand.kd_range[1], (len(env_ids), self.num_dofs), device=self.device)
 
     def _parse_cfg(self, cfg):
         self.dt = self.cfg.control.dt
@@ -1361,6 +1418,9 @@ class GO2SparkBiped(BaseTask):
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
 
         self.push_interval_s = self.cfg.domain_rand.push_interval_s
+        self.max_train_steps = self.cfg.env.max_iterations * self.max_episode_length
+        self.num_dofs = self.cfg.env.num_dofs
+        self.gain_scale_range = self.cfg.control.gain_scale_range
 
         self.dof_names = self.cfg.asset.dof_names
         self.debug = self.cfg.env.debug
@@ -1414,13 +1474,19 @@ class GO2SparkBiped(BaseTask):
         return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
 
     def _neg_reward_action_rate(self):
-        # Penalize changes in actions
-        return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+        cost = torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+        return cost
+
+        # Penalize changes in actions, scaled by training progress (floor of 0.3 so it's never free)
+        #progress = 0.3 + 0.7 * min(self.common_step_counter / self.max_train_steps, 1.0)
+        #return progress * torch.sum(torch.square(self.last_actions - self.actions), dim=1)
 
     def _neg_reward_action_smoothness(self):
-        # Penalize action smoothness
+        # Penalize action smoothness, scaled by training progress (floor of 0.3 so it's never free)
         action_smoothness_cost = torch.sum(torch.square(self.actions - 2*self.last_actions + self.llast_actions), dim=-1)
-        return action_smoothness_cost
+        #return action_smoothness_cost
+        progress = 0.5 + 0.5 * min(self.common_step_counter / self.max_train_steps, 1.0)
+        return progress * action_smoothness_cost
 
     def _neg_reward_collision(self):
         # Penalize collisions on selected bodies
@@ -1528,6 +1594,15 @@ class GO2SparkBiped(BaseTask):
 
         gate = self._biped_orientation_gate()
         return torch.lerp(torch.zeros_like(reward), reward, gate)
+
+    def _neg_reward_foot_impact_vel(self):
+        """Penalize high downward foot velocity at the moment of ground contact (touchdown)."""
+        # feet_vel[:, :, 2] is world-frame vertical velocity; negative = downward
+        hind_vel_z = self.feet_vel[:, 2:, 2]            # [B, 2] hind feet only
+        hind_new = self.new_contacts[:, 2:].float()      # [B, 2] 1 on first contact frame
+        # Only penalize downward velocity (negative z) at touchdown
+        impact_speed = (-hind_vel_z).clamp(min=0.0)
+        return torch.sum(hind_new * impact_speed.pow(2), dim=1)
 
     def count_bad(self, loc):
         n_nan_loc   = torch.isnan(loc).sum().item()

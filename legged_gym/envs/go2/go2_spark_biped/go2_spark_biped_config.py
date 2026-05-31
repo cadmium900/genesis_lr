@@ -1,18 +1,22 @@
 from legged_gym.envs.base.base_config import BaseConfig
 
+iteration_count = 5000
+
 class GO2SparkBipedCfg(BaseConfig):
 
     class env:
         episode_length_s = 20 # episode length in seconds
-        num_envs = 21500
+        max_iterations = iteration_count
+        num_envs = 43000 #21500
         env_spacing = 1.0
-        num_actions = 12
+        num_dofs = 12
+        num_actions = 36  # 12 pos targets + 12 kp scales + 12 kd scales
         # observation history
         frame_stack = 5   # policy frame stack
         c_frame_stack = 5  # critic frame stack
-        num_single_obs = 62
+        num_single_obs = 86  # 62 + 24 gain actions
         num_observations = int(num_single_obs * frame_stack)
-        single_num_privileged_obs = 99
+        single_num_privileged_obs = 124  # 100 + 24 gain actions
         num_privileged_obs = int(c_frame_stack * single_num_privileged_obs)
         send_timeouts = True
         debug = False
@@ -92,8 +96,10 @@ class GO2SparkBipedCfg(BaseConfig):
         stiffness = {'joint': 28.0} #30.}   # [N*m/rad]
         damping = {'joint': 0.75} #0.6}     # [N*m*s/rad]
         action_scale = 0.25  # action scale: target angle = actionScale * action + defaultAngle
+        gain_scale_range = [0.75, 1.25]  # sigmoid output range for policy kp/kd scale factors
+        gain_filter_alpha = 0.2       # EMA smoothing for gain scheduling (0=frozen, 1=no filter)
         dt = 0.02  # control frequency 50Hz
-        decimation = 4  # decimation: Number of control action updates @ sim DT per policy DT
+        decimation = 4
 
     class asset:
         name = "go2" # name of the robot
@@ -136,11 +142,13 @@ class GO2SparkBipedCfg(BaseConfig):
         kp_range = [0.7, 1.2]
         kd_range = [0.8, 1.5]
         randomize_joint_armature = enable
-        joint_armature_range = [0.015, 0.025]  # [N*m*s/rad]
+        joint_armature_range = [0.015, 0.025]
         randomize_joint_stiffness = enable
         joint_stiffness_range = [0.01, 0.02]
         randomize_joint_damping = enable
         joint_damping_range = [0.25, 0.3]
+        randomize_joint_friction_loss = enable
+        joint_friction_loss_range = [0.15, 0.25]  # MuJoCo frictionloss=0.2, smooth coulomb model
         termination_z = -0.05 # 0.8
 
     class rewards:
@@ -174,7 +182,7 @@ class GO2SparkBipedCfg(BaseConfig):
 
         class scales:
             front_feet_off = 0.35
-            front_feet_on_ground_push = 0.0025
+            #front_feet_on_ground_push = 0.0025
             hind_alternation = 0.82
             com_over_support = 0.5
             tracking_lin_vel = 1.5
@@ -194,20 +202,21 @@ class GO2SparkBipedCfg(BaseConfig):
 
 
             #heavy_foot = -0.3
+            foot_impact_vel = -0.5
             dof_pos_limits = -10.0
             collision = -1.0
             dof_vel = -5e-4
             dof_acc = -2e-7
-            action_rate = -0.003
-            action_smoothness = -0.03
+            action_rate = -0.001
+            action_smoothness = -0.07
             hip_pos = -0.5
             pitch_rate = -10.0
             termination = -0.0
 
         class behavior_params_range:
             resampling_time = 6.0
-            gait_period_range = [0.50, 1.5] # [0.30, 0.60]
-            foot_clearance_target_range = [0.26, 0.29]
+            gait_period_range = [1.0, 1.5] # [0.30, 0.60]
+            foot_clearance_target_range = [0.15, 0.20]
             base_height_target_range = [0.50, 0.65]
             pitch_target_range = [1.0, 1.0]
 
@@ -275,9 +284,9 @@ class GO2SparkBipedCfgPPO():
         run_name = 'spark'
         experiment_name = 'go2_spark_biped'
         save_interval = 500
-        load_run = "Dec17_20-51-51_spark"
+        load_run = "Mar25_11-50-54_spark"
         checkpoint = -1
-        max_iterations = 5000
+        max_iterations = iteration_count
         num_steps_per_env = 16 #32
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'

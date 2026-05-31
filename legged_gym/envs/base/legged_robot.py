@@ -16,6 +16,7 @@ from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.utils.gs_utils import *
 from .legged_robot_config import LeggedRobotCfg
+import os
 
 
 class LeggedRobot(BaseTask):
@@ -721,7 +722,14 @@ class LeggedRobot(BaseTask):
                     target_val = max(target_val, lower)
                 if np.isfinite(upper):
                     target_val = min(target_val, upper)
-            init_qpos = np.array(joint.init_qpos(), copy=True, dtype=np.float64)
+            init_qpos_src = getattr(joint, "init_qpos", None)
+            if init_qpos_src is None:
+                continue
+            init_qpos = np.array(
+                init_qpos_src() if callable(init_qpos_src) else init_qpos_src,
+                copy=True,
+                dtype=np.float64,
+            )
             init_qpos[...] = target_val
             joint._init_qpos = init_qpos
 
